@@ -367,7 +367,7 @@ impl ResponseStream {
                 let is_online = NetworkStatus::as_ref(ctx).is_online();
                 match recovery_action(
                     self.has_received_client_actions,
-                    e.is_recoverable(),
+                    e.is_recoverable() && !cfg!(feature = "offline"),
                     self.retry_count < MAX_RETRIES,
                     self.can_attempt_resume_on_error,
                     is_online,

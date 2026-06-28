@@ -1,7 +1,10 @@
 use std::collections::{HashMap, HashSet};
 use std::sync::{Arc, OnceLock};
 
-use ai::api_keys::{ApiKeyManager, ApiKeyManagerEvent, CustomEndpoint, CustomEndpointModel};
+use ai::api_keys::{
+    ApiKeyManager, ApiKeyManagerEvent, CustomEndpoint, CustomEndpointModel,
+    CustomEndpointReachability,
+};
 pub use ai::LLMId;
 use parking_lot::FairMutex;
 use serde::{de, Deserialize, Serialize};
@@ -924,8 +927,9 @@ impl LLMPreferences {
     }
 
     fn custom_inference_enabled(app: &AppContext) -> bool {
-        FeatureFlag::CustomInferenceEndpoints.is_enabled()
-            && UserWorkspaces::as_ref(app).is_custom_inference_enabled(app)
+        cfg!(feature = "offline")
+            || (FeatureFlag::CustomInferenceEndpoints.is_enabled()
+                && UserWorkspaces::as_ref(app).is_custom_inference_enabled(app))
     }
 
     /// Resolves a custom model router by its `config_key`/`LLMId`.
@@ -1574,12 +1578,13 @@ fn get_new_agent_mode_choices(
 /// a `ModelConfig.{base,coding,cli_agent,computer_use_agent}` selection back to the
 /// user-provided endpoint.
 ///
-/// Endpoints with empty URL or API key, and models with empty name or config_key, are
-/// skipped — they shouldn't surface in the picker until the user finishes configuring them.
+/// Remote endpoints with empty URL/API key, local endpoints with empty URL, and models with
+/// empty name or config_key are skipped — they shouldn't surface in the picker until the user
+/// finishes configuring them.
 fn build_custom_llm_infos(keys: &ai::api_keys::ApiKeys) -> Vec<LLMInfo> {
     keys.custom_endpoints
         .iter()
-        .filter(|ep| !ep.url.trim().is_empty() && !ep.api_key.is_empty())
+        .filter(|ep| ep.is_configured_for_use())
         .flat_map(|endpoint| {
             endpoint
                 .models
@@ -1601,7 +1606,14 @@ fn custom_llm_info_from(endpoint: &CustomEndpoint, model: &CustomEndpointModel) 
             request_multiplier: 1,
             credit_multiplier: None,
         },
-        description: Some(format!("Custom · {}", endpoint.name)),
+        description: Some(match endpoint.reachability {
+            CustomEndpointReachability::RemoteServerReachable => {
+                format!("Custom · {}", endpoint.name)
+            }
+            CustomEndpointReachability::LocalClientReachable => {
+                format!("Custom · {} · Local device", endpoint.name)
+            }
+        }),
         disable_reason: None,
         vision_supported: true,
         spec: None,

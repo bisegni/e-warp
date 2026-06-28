@@ -8,7 +8,7 @@ use std::pin::Pin;
 use std::sync::Arc;
 
 pub use ai::agent::convert::ConvertToAPITypeError;
-use ai::api_keys::ApiKeyManager;
+use ai::api_keys::{ApiKeyManager, CustomEndpointReachability};
 pub use convert_from::{
     user_inputs_from_messages, ConversionParams, ConvertAPIMessageToClientOutputMessage,
     MaybeAIAgentOutputMessage, MessageToAIAgentOutputMessageError,
@@ -117,6 +117,9 @@ pub struct RequestParams {
     /// User-provided custom model providers (BYOK endpoints).
     pub custom_model_providers:
         Option<warp_multi_agent_api::request::settings::CustomModelProviders>,
+    pub local_custom_model_config_keys: Vec<String>,
+    /// Local-only endpoint configuration. This is never serialized into a server request.
+    pub local_custom_endpoint: Option<::ai::api_keys::CustomEndpoint>,
     /// User-defined custom model routers referenced by the current selection. Mirrors
     /// `custom_model_providers`: the selected model's `config_key` indexes into this
     /// registry. `None` when no custom router is selected.
@@ -181,6 +184,8 @@ impl RequestParams {
             should_redact_secrets: false,
             api_keys: None,
             custom_model_providers: None,
+            local_custom_model_config_keys: vec![],
+            local_custom_endpoint: None,
             custom_model_routers: None,
             allow_use_of_warp_credits: false,
             autonomy_level: Default::default(),
@@ -288,13 +293,60 @@ impl RequestParams {
             user_workspaces.is_aws_bedrock_credentials_enabled(app),
             geap_binding,
         );
-        let is_custom_inference_enabled = user_workspaces.is_custom_inference_enabled(app);
-        let custom_model_providers = FeatureFlag::CustomInferenceEndpoints
-            .is_enabled()
+        let is_custom_inference_enabled =
+            cfg!(feature = "offline") || user_workspaces.is_custom_inference_enabled(app);
+        let custom_inference_available =
+            cfg!(feature = "offline") || FeatureFlag::CustomInferenceEndpoints.is_enabled();
+        let custom_model_providers = custom_inference_available
             .then(|| {
                 api_key_manager.custom_model_providers_for_request(is_custom_inference_enabled)
             })
             .flatten();
+        let selected_model_ids = [
+            &request_input.model_id,
+            &request_input.coding_model_id,
+            &request_input.cli_agent_model_id,
+            &request_input.computer_use_model_id,
+        ];
+        let mut local_custom_model_config_keys =
+            if custom_inference_available && is_custom_inference_enabled {
+                selected_model_ids
+                    .into_iter()
+                    .filter(|id| {
+                        api_key_manager.custom_endpoint_reachability_for_config_key(id.as_str())
+                            == Some(CustomEndpointReachability::LocalClientReachable)
+                    })
+                    .map(|id| id.as_str().to_owned())
+                    .collect()
+            } else {
+                vec![]
+            };
+        if cfg!(feature = "offline") && local_custom_model_config_keys.is_empty() {
+            let first_configured_local_model = api_key_manager
+                .keys()
+                .custom_endpoints
+                .iter()
+                .filter(|endpoint| {
+                    endpoint.reachability == CustomEndpointReachability::LocalClientReachable
+                        && endpoint.is_configured_for_use()
+                })
+                .flat_map(|endpoint| endpoint.models.iter())
+                .filter(|model| !model.name.trim().is_empty())
+                .next();
+            if let Some(model) = first_configured_local_model {
+                local_custom_model_config_keys.push(model.config_key.clone());
+            }
+        }
+        let local_custom_endpoint = local_custom_model_config_keys
+            .first()
+            .and_then(|config_key| {
+                api_key_manager
+                    .keys()
+                    .custom_endpoints
+                    .iter()
+                    .find(|endpoint| endpoint.has_model_config_key(config_key))
+                    .cloned()
+            });
         let custom_model_routers = FeatureFlag::CustomModelRouters.is_enabled().then(|| {
             LLMPreferences::as_ref(app).custom_model_routers_for_request(
                 &request_input.model_id,
@@ -366,7 +418,10 @@ impl RequestParams {
             context_window_limit,
             metadata,
             session_context,
-            model: request_input.model_id.clone(),
+            model: local_custom_model_config_keys
+                .first()
+                .map(|config_key| LLMId::from(config_key.as_str()))
+                .unwrap_or_else(|| request_input.model_id.clone()),
             coding_model: request_input.coding_model_id.clone(),
             cli_agent_model: request_input.cli_agent_model_id.clone(),
             computer_use_model: request_input.computer_use_model_id.clone(),
@@ -377,6 +432,8 @@ impl RequestParams {
             should_redact_secrets,
             api_keys,
             custom_model_providers,
+            local_custom_model_config_keys,
+            local_custom_endpoint,
             custom_model_routers,
             allow_use_of_warp_credits,
             autonomy_level,

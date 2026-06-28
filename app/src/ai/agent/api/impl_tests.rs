@@ -35,6 +35,8 @@ fn request_params_with_ask_user_question_enabled(ask_user_question_enabled: bool
         should_redact_secrets: false,
         api_keys: None,
         custom_model_providers: None,
+        local_custom_model_config_keys: vec![],
+        local_custom_endpoint: None,
         custom_model_routers: None,
         allow_use_of_warp_credits: false,
         autonomy_level: api::AutonomyLevel::Supervised,
@@ -56,6 +58,13 @@ fn request_params_for_remote(host_id: Option<HostId>) -> RequestParams {
         SessionContext::new_with_session_type_for_test(Some(SessionType::WarpifiedRemote {
             host_id,
         }));
+    params
+}
+
+fn request_params_for_local_custom_model() -> RequestParams {
+    let mut params = request_params_with_ask_user_question_enabled(false);
+    params.model = LLMId::from("local-config-key");
+    params.local_custom_model_config_keys = vec!["local-config-key".to_string()];
     params
 }
 
@@ -197,4 +206,37 @@ fn remote_supported_tools_omit_search_codebase_when_remote_is_not_connected() {
 
     assert!(!supported_tools.contains(&api::ToolType::SearchCodebase));
     assert!(!supported_cli_agent_tools.contains(&api::ToolType::SearchCodebase));
+}
+
+#[test]
+fn local_custom_endpoint_error_none_for_remote_model() {
+    let params = request_params_with_ask_user_question_enabled(false);
+
+    assert!(super::local_custom_endpoint_error(&params).is_none());
+}
+
+#[test]
+fn local_custom_endpoint_error_blocks_remote_sessions() {
+    let mut params = request_params_for_local_custom_model();
+    params.session_context =
+        SessionContext::new_with_session_type_for_test(Some(SessionType::WarpifiedRemote {
+            host_id: Some(HostId::new("host".to_string())),
+        }));
+
+    let error = super::local_custom_endpoint_error(&params).expect("local model should be blocked");
+
+    assert!(error
+        .to_string()
+        .contains("reachable only from this device"));
+}
+
+#[test]
+fn local_custom_endpoint_error_reports_missing_relay_support_for_local_sessions() {
+    let params = request_params_for_local_custom_model();
+
+    let error = super::local_custom_endpoint_error(&params).expect("local model should be blocked");
+
+    assert!(error
+        .to_string()
+        .contains("LocalModelCompletion relay support"));
 }

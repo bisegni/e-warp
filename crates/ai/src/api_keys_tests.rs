@@ -17,6 +17,7 @@ fn make_manager_with_grok(keys: ApiKeys, grok_tokens: Option<GrokTokens>) -> Api
         aws_credentials_state: AwsCredentialsState::Missing,
         aws_credentials_refresh_strategy: AwsCredentialsRefreshStrategy::default(),
         geap_credentials_state: GeapCredentialsState::Missing,
+        #[cfg(not(feature = "offline"))]
         secure_storage_write_version: 0,
         grok_secure_storage_write_version: 0,
     }
@@ -101,6 +102,29 @@ fn endpoint_with_keys(
         name: name.into(),
         url: url.into(),
         api_key: api_key.into(),
+        reachability: CustomEndpointReachability::RemoteServerReachable,
+        models: models
+            .iter()
+            .map(|(n, a, cfg)| CustomEndpointModel {
+                name: (*n).into(),
+                alias: a.map(|s| s.into()),
+                config_key: (*cfg).into(),
+            })
+            .collect(),
+    }
+}
+
+fn local_endpoint_with_keys(
+    name: &str,
+    url: &str,
+    api_key: &str,
+    models: &[(&str, Option<&str>, &str)],
+) -> CustomEndpoint {
+    CustomEndpoint {
+        name: name.into(),
+        url: url.into(),
+        api_key: api_key.into(),
+        reachability: CustomEndpointReachability::LocalClientReachable,
         models: models
             .iter()
             .map(|(n, a, cfg)| CustomEndpointModel {
@@ -158,6 +182,66 @@ fn serde_round_trip_with_custom_endpoints() {
     assert_eq!(keys, deser);
 }
 
+#[cfg(feature = "offline")]
+#[test]
+fn offline_api_keys_file_round_trips_with_private_permissions() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("offline-ai-api-keys.json");
+    let keys = ApiKeys {
+        custom_endpoints: vec![local_endpoint_with_keys(
+            "Ollama",
+            "http://localhost:11434/v1",
+            "local-secret",
+            &[("qwen3", None, "local-config")],
+        )],
+        ..Default::default()
+    };
+    let json = serde_json::to_string(&keys).unwrap();
+
+    ApiKeyManager::write_offline_keys_file_at(&path, &json).unwrap();
+
+    let restored: ApiKeys = serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+    assert_eq!(restored, keys);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        assert_eq!(
+            std::fs::metadata(&path).unwrap().permissions().mode() & 0o777,
+            0o600
+        );
+        assert_eq!(
+            std::fs::metadata(dir.path()).unwrap().permissions().mode() & 0o777,
+            0o700
+        );
+    }
+}
+
+#[cfg(feature = "offline")]
+#[test]
+fn offline_api_keys_normalize_saved_endpoints_to_local_reachability() {
+    let mut keys = ApiKeys {
+        custom_endpoints: vec![endpoint_with_keys(
+            "Local gateway",
+            "https://slacstudio.local:4443/v1",
+            "secret",
+            &[("ollama/qwen3.5:9b", None, "local-config")],
+        )],
+        ..Default::default()
+    };
+    assert_eq!(
+        keys.custom_endpoints[0].reachability,
+        CustomEndpointReachability::RemoteServerReachable
+    );
+
+    let json = serde_json::to_string(&keys).unwrap();
+    keys = ApiKeyManager::normalize_offline_keys(serde_json::from_str(&json).unwrap());
+
+    assert_eq!(
+        keys.custom_endpoints[0].reachability,
+        CustomEndpointReachability::LocalClientReachable
+    );
+}
+
 #[test]
 fn serde_ignores_unknown_fields() {
     let json = r#"{"openai":"sk-x","unknown_field":"value","custom_endpoints":[]}"#;
@@ -198,6 +282,20 @@ fn has_any_key_false_for_endpoint_with_empty_api_key() {
         ..Default::default()
     };
     assert!(!keys.has_any_key());
+}
+
+#[test]
+fn has_any_key_true_for_local_endpoint_without_api_key() {
+    let keys = ApiKeys {
+        custom_endpoints: vec![local_endpoint_with_keys(
+            "Ollama",
+            "http://localhost:11434/v1",
+            "",
+            &[("llama3.1", None, "uuid-local")],
+        )],
+        ..Default::default()
+    };
+    assert!(keys.has_any_key());
 }
 
 // ── provider_key_count ─────────────────────────────────────────
@@ -272,6 +370,47 @@ fn custom_model_providers_populates_single_endpoint() {
 }
 
 #[test]
+fn custom_model_providers_omits_url_and_key_for_local_endpoint() {
+    let mgr = make_manager(ApiKeys {
+        custom_endpoints: vec![local_endpoint_with_keys(
+            "SLAC Studio",
+            "https://slacstudio.local:4443/v1",
+            "ep-key",
+            &[("llama", Some("local llama"), "uuid-local")],
+        )],
+        ..Default::default()
+    });
+    let result = mgr.custom_model_providers_for_request(true).unwrap();
+    assert_eq!(result.providers.len(), 1);
+    let p = &result.providers[0];
+    assert!(p.base_url.is_empty());
+    assert!(p.api_key.is_empty());
+    assert_eq!(p.models.len(), 1);
+    assert_eq!(p.models[0].slug, "llama");
+    assert_eq!(p.models[0].config_key, "uuid-local");
+}
+
+#[test]
+fn custom_model_providers_includes_local_endpoint_without_api_key() {
+    let mgr = make_manager(ApiKeys {
+        custom_endpoints: vec![local_endpoint_with_keys(
+            "Ollama",
+            "http://localhost:11434/v1",
+            "",
+            &[("llama3.1", Some("Ollama"), "uuid-local")],
+        )],
+        ..Default::default()
+    });
+    let result = mgr.custom_model_providers_for_request(true).unwrap();
+    assert_eq!(result.providers.len(), 1);
+    let p = &result.providers[0];
+    assert!(p.base_url.is_empty());
+    assert!(p.api_key.is_empty());
+    assert_eq!(p.models[0].slug, "llama3.1");
+    assert_eq!(p.models[0].config_key, "uuid-local");
+}
+
+#[test]
 fn multiple_endpoints_all_serialize() {
     let mgr = make_manager(ApiKeys {
         custom_endpoints: vec![
@@ -325,6 +464,24 @@ fn empty_api_key_endpoints_are_skipped() {
     let result = mgr.custom_model_providers_for_request(true).unwrap();
     assert_eq!(result.providers.len(), 1);
     assert_eq!(result.providers[0].base_url, "https://b.io");
+}
+
+#[test]
+fn custom_endpoint_reachability_resolves_local_config_key() {
+    let mgr = make_manager(ApiKeys {
+        custom_endpoints: vec![local_endpoint_with_keys(
+            "Ollama",
+            "http://localhost:11434/v1",
+            "",
+            &[("llama3.1", None, "uuid-local")],
+        )],
+        ..Default::default()
+    });
+
+    assert_eq!(
+        mgr.custom_endpoint_reachability_for_config_key("uuid-local"),
+        Some(CustomEndpointReachability::LocalClientReachable)
+    );
 }
 
 #[test]

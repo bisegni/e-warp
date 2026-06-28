@@ -12,7 +12,11 @@ pub use crate::geap_credentials::{
     LoadGeapCredentialsError, GEAP_REFRESH_LEAD_TIME,
 };
 
+#[cfg(not(feature = "offline"))]
 const SECURE_STORAGE_KEY: &str = "AiApiKeys";
+
+#[cfg(feature = "offline")]
+const OFFLINE_API_KEYS_FILE: &str = "offline-ai-api-keys.json";
 
 /// Secure-storage key for the connected xAI/Grok subscription's OAuth tokens.
 /// Kept separate from [`SECURE_STORAGE_KEY`] because these are OAuth tokens with
@@ -45,7 +49,16 @@ pub struct CustomEndpoint {
     pub name: String,
     pub url: String,
     pub api_key: String,
+    pub reachability: CustomEndpointReachability,
     pub models: Vec<CustomEndpointModel>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum CustomEndpointReachability {
+    #[default]
+    RemoteServerReachable,
+    LocalClientReachable,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
@@ -79,7 +92,7 @@ impl ApiKeys {
             || self
                 .custom_endpoints
                 .iter()
-                .any(|endpoint| !endpoint.api_key.trim().is_empty())
+                .any(CustomEndpoint::is_configured_for_use)
     }
 
     /// Number of single-provider API keys currently configured (OpenAI,
@@ -95,6 +108,25 @@ impl ApiKeys {
         .into_iter()
         .filter(|key| key.as_deref().is_some_and(|v| !v.trim().is_empty()))
         .count()
+    }
+}
+
+impl CustomEndpoint {
+    pub fn is_configured_for_use(&self) -> bool {
+        if self.url.trim().is_empty() {
+            return false;
+        }
+
+        match self.reachability {
+            CustomEndpointReachability::RemoteServerReachable => !self.api_key.trim().is_empty(),
+            CustomEndpointReachability::LocalClientReachable => true,
+        }
+    }
+
+    pub fn has_model_config_key(&self, config_key: &str) -> bool {
+        self.models
+            .iter()
+            .any(|model| model.config_key == config_key && !model.name.trim().is_empty())
     }
 }
 
@@ -180,6 +212,7 @@ pub struct ApiKeyManager {
     aws_credentials_refresh_strategy: AwsCredentialsRefreshStrategy,
     /// In-memory Gemini Enterprise (GEAP) credential state.
     pub(crate) geap_credentials_state: GeapCredentialsState,
+    #[cfg(not(feature = "offline"))]
     secure_storage_write_version: u64,
     grok_secure_storage_write_version: u64,
 }
@@ -198,6 +231,7 @@ impl ApiKeyManager {
             aws_credentials_state: AwsCredentialsState::Missing,
             aws_credentials_refresh_strategy: AwsCredentialsRefreshStrategy::default(),
             geap_credentials_state: GeapCredentialsState::Missing,
+            #[cfg(not(feature = "offline"))]
             secure_storage_write_version: 0,
             grok_secure_storage_write_version: 0,
         }
@@ -205,6 +239,20 @@ impl ApiKeyManager {
 
     pub fn keys(&self) -> &ApiKeys {
         &self.keys
+    }
+
+    pub fn keys_are_persisted(&self) -> bool {
+        #[cfg(feature = "offline")]
+        {
+            let path = warp_core::paths::state_dir().join(OFFLINE_API_KEYS_FILE);
+            return std::fs::read_to_string(path)
+                .ok()
+                .and_then(|json| serde_json::from_str::<ApiKeys>(&json).ok())
+                .is_some_and(|keys| keys == self.keys);
+        }
+
+        #[cfg(not(feature = "offline"))]
+        true
     }
 
     /// The currently stored xAI/Grok OAuth tokens, if the user has connected a
@@ -269,13 +317,16 @@ impl ApiKeyManager {
         name: String,
         url: String,
         api_key: String,
+        reachability: CustomEndpointReachability,
         models: Vec<(String, Option<String>, Option<String>)>,
         ctx: &mut ModelContext<Self>,
     ) {
+        let reachability = Self::effective_custom_endpoint_reachability(reachability);
         self.keys.custom_endpoints.push(CustomEndpoint {
             name,
             url,
             api_key,
+            reachability,
             models: models
                 .into_iter()
                 .map(|(name, alias, config_key)| CustomEndpointModel {
@@ -297,16 +348,19 @@ impl ApiKeyManager {
         name: String,
         url: String,
         api_key: String,
+        reachability: CustomEndpointReachability,
         models: Vec<(String, Option<String>, Option<String>)>,
         ctx: &mut ModelContext<Self>,
     ) {
         if index >= self.keys.custom_endpoints.len() {
             return;
         }
+        let reachability = Self::effective_custom_endpoint_reachability(reachability);
         self.keys.custom_endpoints[index] = CustomEndpoint {
             name,
             url,
             api_key,
+            reachability,
             models: models
                 .into_iter()
                 .map(|(name, alias, config_key)| CustomEndpointModel {
@@ -338,6 +392,16 @@ impl ApiKeyManager {
         self.keys.custom_endpoints.clear();
         ctx.emit(ApiKeyManagerEvent::KeysUpdated);
         self.write_keys_to_secure_storage(ctx);
+    }
+
+    fn effective_custom_endpoint_reachability(
+        reachability: CustomEndpointReachability,
+    ) -> CustomEndpointReachability {
+        if cfg!(feature = "offline") {
+            CustomEndpointReachability::LocalClientReachable
+        } else {
+            reachability
+        }
     }
 
     pub fn set_aws_credentials_state(
@@ -401,11 +465,19 @@ impl ApiKeyManager {
             .keys
             .custom_endpoints
             .iter()
-            .filter(|endpoint| !endpoint.url.trim().is_empty() && !endpoint.api_key.is_empty())
+            .filter(|endpoint| endpoint.is_configured_for_use())
             .map(
                 |endpoint| api::request::settings::custom_model_providers::CustomModelProvider {
-                    base_url: endpoint.url.clone(),
-                    api_key: endpoint.api_key.clone(),
+                    base_url: match endpoint.reachability {
+                        CustomEndpointReachability::RemoteServerReachable => endpoint.url.clone(),
+                        CustomEndpointReachability::LocalClientReachable => String::new(),
+                    },
+                    api_key: match endpoint.reachability {
+                        CustomEndpointReachability::RemoteServerReachable => {
+                            endpoint.api_key.clone()
+                        }
+                        CustomEndpointReachability::LocalClientReachable => String::new(),
+                    },
                     models: endpoint
                         .models
                         .iter()
@@ -427,6 +499,19 @@ impl ApiKeyManager {
         } else {
             Some(api::request::settings::CustomModelProviders { providers })
         }
+    }
+
+    pub fn custom_endpoint_reachability_for_config_key(
+        &self,
+        config_key: &str,
+    ) -> Option<CustomEndpointReachability> {
+        self.keys
+            .custom_endpoints
+            .iter()
+            .find(|endpoint| {
+                endpoint.is_configured_for_use() && endpoint.has_model_config_key(config_key)
+            })
+            .map(|endpoint| endpoint.reachability)
     }
 
     pub fn api_keys_for_request(
@@ -530,6 +615,13 @@ impl ApiKeyManager {
     }
 
     fn load_keys_from_secure_storage(ctx: &mut ModelContext<Self>) -> ApiKeys {
+        #[cfg(feature = "offline")]
+        {
+            let _ = ctx;
+            return Self::load_offline_keys_from_file();
+        }
+
+        #[cfg(not(feature = "offline"))]
         let key_json = match ctx.secure_storage().read_value(SECURE_STORAGE_KEY) {
             Ok(json) => json,
             Err(e) => {
@@ -540,6 +632,7 @@ impl ApiKeyManager {
             }
         };
 
+        #[cfg(not(feature = "offline"))]
         match serde_json::from_str(&key_json) {
             Ok(keys) => keys,
             Err(e) => {
@@ -557,23 +650,106 @@ impl ApiKeyManager {
                 return;
             }
         };
-        self.secure_storage_write_version += 1;
-        let write_version = self.secure_storage_write_version;
 
-        // Defer the keychain write so it doesn't block the current event
-        // processing. The in-memory state is already updated and events
-        // already emitted, so the UI updates immediately while the
-        // potentially slow platform secure-storage call runs in a
-        // subsequent main-thread callback. Skip stale callbacks so older
-        // writes cannot complete after and overwrite a newer payload.
-        ctx.spawn(async move { json }, move |me, json, ctx| {
-            if write_version != me.secure_storage_write_version {
-                return;
+        #[cfg(feature = "offline")]
+        {
+            let _ = ctx;
+            if let Err(e) = Self::write_offline_keys_file(&json) {
+                log::error!("Failed to write offline API keys to local storage: {e:#}");
             }
-            if let Err(e) = ctx.secure_storage().write_value(SECURE_STORAGE_KEY, &json) {
-                log::error!("Failed to write API keys to secure storage: {e:#}");
+        }
+
+        #[cfg(not(feature = "offline"))]
+        {
+            self.secure_storage_write_version += 1;
+            let write_version = self.secure_storage_write_version;
+
+            // Defer the keychain write so it doesn't block the current event
+            // processing. The in-memory state is already updated and events
+            // already emitted, so the UI updates immediately while the
+            // potentially slow platform secure-storage call runs in a
+            // subsequent main-thread callback. Skip stale callbacks so older
+            // writes cannot complete after and overwrite a newer payload.
+            ctx.spawn(async move { json }, move |me, json, ctx| {
+                if write_version != me.secure_storage_write_version {
+                    return;
+                }
+                if let Err(e) = ctx.secure_storage().write_value(SECURE_STORAGE_KEY, &json) {
+                    log::error!("Failed to write API keys to secure storage: {e:#}");
+                }
+            });
+        }
+    }
+
+    #[cfg(feature = "offline")]
+    fn load_offline_keys_from_file() -> ApiKeys {
+        let path = warp_core::paths::state_dir().join(OFFLINE_API_KEYS_FILE);
+        let json = match std::fs::read_to_string(&path) {
+            Ok(json) => json,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => return ApiKeys::default(),
+            Err(e) => {
+                log::error!("Failed to read offline API keys from local storage: {e:#}");
+                return ApiKeys::default();
             }
-        });
+        };
+
+        match serde_json::from_str(&json) {
+            Ok(keys) => {
+                let normalized = Self::normalize_offline_keys(keys);
+                if let Ok(normalized_json) = serde_json::to_string(&normalized) {
+                    if normalized_json != json {
+                        if let Err(e) = Self::write_offline_keys_file_at(&path, &normalized_json) {
+                            log::error!(
+                                "Failed to normalize offline API keys in local storage: {e:#}"
+                            );
+                        }
+                    }
+                }
+                normalized
+            }
+            Err(e) => {
+                log::error!("Failed to deserialize offline API keys: {e:#}");
+                ApiKeys::default()
+            }
+        }
+    }
+
+    #[cfg(feature = "offline")]
+    fn write_offline_keys_file(json: &str) -> anyhow::Result<()> {
+        let path = warp_core::paths::state_dir().join(OFFLINE_API_KEYS_FILE);
+        Self::write_offline_keys_file_at(&path, json)
+    }
+
+    #[cfg(feature = "offline")]
+    fn normalize_offline_keys(mut keys: ApiKeys) -> ApiKeys {
+        for endpoint in &mut keys.custom_endpoints {
+            endpoint.reachability = CustomEndpointReachability::LocalClientReachable;
+        }
+        keys
+    }
+
+    #[cfg(feature = "offline")]
+    fn write_offline_keys_file_at(path: &std::path::Path, json: &str) -> anyhow::Result<()> {
+        let parent = path
+            .parent()
+            .ok_or_else(|| anyhow::anyhow!("offline API key path has no parent"))?;
+        std::fs::create_dir_all(parent)?;
+
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(parent, std::fs::Permissions::from_mode(0o700))?;
+        }
+
+        let temp_path = path.with_extension("json.tmp");
+        std::fs::write(&temp_path, json)?;
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&temp_path, std::fs::Permissions::from_mode(0o600))?;
+        }
+        std::fs::rename(&temp_path, path)?;
+        Ok(())
     }
 
     fn load_grok_tokens_from_secure_storage(ctx: &mut ModelContext<Self>) -> Option<GrokTokens> {

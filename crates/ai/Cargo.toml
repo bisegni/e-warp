@@ -6,6 +6,7 @@ publish.workspace = true
 license.workspace = true
 
 [features]
+offline = []
 jemalloc = []
 local_fs = []
 test-util = []

@@ -1,4 +1,4 @@
-use ::ai::api_keys::{ApiKeyManager, ApiKeyManagerEvent, ApiKeys};
+use ::ai::api_keys::{ApiKeyManager, ApiKeyManagerEvent, ApiKeys, CustomEndpointReachability};
 #[cfg(not(target_family = "wasm"))]
 use ::ai::grok_subscription::oauth::{self, ManualCodeExchange};
 use chrono::{DateTime, Local};
@@ -601,7 +601,9 @@ pub fn init_actions_from_parent_view<T: Action + Clone>(
             )
             .with_group(bindings::BindingGroup::WarpAi)
             .is_supported_on_current_platform(
-                UserWorkspaces::as_ref(app).is_byo_api_key_enabled(app)
+                cfg!(feature = "offline")
+                    || UserWorkspaces::as_ref(app).is_byo_api_key_enabled(app)
+                    || cfg!(feature = "offline")
                     || (FeatureFlag::CustomInferenceEndpoints.is_enabled()
                         && UserWorkspaces::as_ref(app).is_custom_inference_enabled(app)),
             ),
@@ -1738,8 +1740,7 @@ impl AISettingsPageView {
         });
 
         // Custom inference
-        let custom_inference_controls_enabled =
-            is_any_ai_enabled && UserWorkspaces::as_ref(ctx).is_custom_inference_enabled(ctx);
+        let custom_inference_controls_enabled = Self::can_use_custom_inference_controls(ctx);
         let custom_inference_add_button = ctx.add_typed_action_view(|_| {
             ActionButton::new("+ Add custom model", SecondaryTheme)
                 .with_size(ButtonSize::Small)
@@ -2282,9 +2283,10 @@ impl AISettingsPageView {
             .collect()
     }
     fn can_use_custom_inference_controls(app: &AppContext) -> bool {
-        FeatureFlag::CustomInferenceEndpoints.is_enabled()
-            && AISettings::as_ref(app).is_any_ai_enabled(app)
-            && UserWorkspaces::as_ref(app).is_custom_inference_enabled(app)
+        cfg!(feature = "offline")
+            || (FeatureFlag::CustomInferenceEndpoints.is_enabled()
+                && AISettings::as_ref(app).is_any_ai_enabled(app)
+                && UserWorkspaces::as_ref(app).is_custom_inference_enabled(app))
     }
 
     fn show_add_custom_endpoint_modal(&mut self, ctx: &mut ViewContext<Self>) {
@@ -2364,21 +2366,34 @@ impl AISettingsPageView {
                 name,
                 url,
                 api_key,
+                reachability,
                 models,
             } => {
                 if !Self::can_use_custom_inference_controls(ctx) {
                     self.hide_custom_endpoint_modal(ctx);
                     return;
                 }
-                ApiKeyManager::handle(ctx).update(ctx, |manager, ctx| {
+                let persisted = ApiKeyManager::handle(ctx).update(ctx, |manager, ctx| {
                     manager.add_custom_endpoint(
                         name.clone(),
                         url.clone(),
                         api_key.clone(),
+                        *reachability,
                         models.clone(),
                         ctx,
                     );
+                    manager.keys_are_persisted()
                 });
+                if !persisted {
+                    let window_id = ctx.window_id();
+                    crate::ToastStack::handle(ctx).update(ctx, |toast_stack, ctx| {
+                        let toast = crate::view_components::DismissibleToast::error(
+                            "Failed to save endpoint to local storage.".to_string(),
+                        );
+                        toast_stack.add_ephemeral_toast(toast, window_id, ctx);
+                    });
+                    return;
+                }
                 self.hide_custom_endpoint_modal(ctx);
 
                 let window_id = ctx.window_id();
@@ -2403,22 +2418,35 @@ impl AISettingsPageView {
                 name,
                 url,
                 api_key,
+                reachability,
                 models,
             } => {
                 if !Self::can_use_custom_inference_controls(ctx) {
                     self.hide_custom_endpoint_modal(ctx);
                     return;
                 }
-                ApiKeyManager::handle(ctx).update(ctx, |manager, ctx| {
+                let persisted = ApiKeyManager::handle(ctx).update(ctx, |manager, ctx| {
                     manager.save_custom_endpoint(
                         *index,
                         name.clone(),
                         url.clone(),
                         api_key.clone(),
+                        *reachability,
                         models.clone(),
                         ctx,
                     );
+                    manager.keys_are_persisted()
                 });
+                if !persisted {
+                    let window_id = ctx.window_id();
+                    crate::ToastStack::handle(ctx).update(ctx, |toast_stack, ctx| {
+                        let toast = crate::view_components::DismissibleToast::error(
+                            "Failed to save endpoint to local storage.".to_string(),
+                        );
+                        toast_stack.add_ephemeral_toast(toast, window_id, ctx);
+                    });
+                    return;
+                }
                 self.hide_custom_endpoint_modal(ctx);
 
                 let window_id = ctx.window_id();
@@ -8502,6 +8530,10 @@ impl ApiKeysWidget {
 
             let chips = super::render_model_chips(model_labels, appearance, text_color);
 
+            let mut endpoint_header = Flex::row()
+                .with_cross_axis_alignment(CrossAxisAlignment::Center)
+                .with_spacing(8.);
+
             let endpoint_name = Text::new_inline(
                 endpoint.name.clone(),
                 appearance.ui_font_family(),
@@ -8510,10 +8542,28 @@ impl ApiKeysWidget {
             .with_style(Properties::default().weight(Weight::Semibold))
             .with_color(text_color.into())
             .finish();
+            endpoint_header.add_child(endpoint_name);
+            if endpoint.reachability == CustomEndpointReachability::LocalClientReachable {
+                endpoint_header.add_child(
+                    Container::new(
+                        Text::new_inline(
+                            "Local device",
+                            appearance.ui_font_family(),
+                            CONTENT_FONT_SIZE,
+                        )
+                        .with_color(text_color.into())
+                        .finish(),
+                    )
+                    .with_uniform_padding(4.)
+                    .with_background(internal_colors::fg_overlay_2(theme))
+                    .with_corner_radius(CornerRadius::with_all(Radius::Pixels(4.)))
+                    .finish(),
+                );
+            }
 
             let left = Flex::column()
                 .with_spacing(8.)
-                .with_child(endpoint_name)
+                .with_child(endpoint_header.finish())
                 .with_child(chips)
                 .finish();
 
@@ -8738,11 +8788,13 @@ impl SettingsWidget for ApiKeysWidget {
         let ai_settings = AISettings::as_ref(app);
         let is_any_ai_enabled = ai_settings.is_any_ai_enabled(app);
         let is_byo_enabled = UserWorkspaces::as_ref(app).is_byo_api_key_enabled(app);
-        let is_custom_inference_enabled =
-            UserWorkspaces::as_ref(app).is_custom_inference_enabled(app);
+        let is_custom_inference_enabled = cfg!(feature = "offline")
+            || UserWorkspaces::as_ref(app).is_custom_inference_enabled(app);
         let provider_keys_enabled = is_any_ai_enabled && is_byo_enabled;
-        let custom_inference_controls_enabled = is_any_ai_enabled && is_custom_inference_enabled;
-        let custom_inference_flag_on = FeatureFlag::CustomInferenceEndpoints.is_enabled();
+        let custom_inference_controls_enabled =
+            cfg!(feature = "offline") || (is_any_ai_enabled && is_custom_inference_enabled);
+        let custom_inference_flag_on =
+            cfg!(feature = "offline") || FeatureFlag::CustomInferenceEndpoints.is_enabled();
         let show_custom_inference = custom_inference_flag_on && is_custom_inference_enabled;
 
         let mut column = Flex::column().with_child(render_separator(appearance));

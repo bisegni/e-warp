@@ -1,6 +1,6 @@
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
 
-use ::ai::api_keys::CustomEndpoint;
+use ::ai::api_keys::{CustomEndpoint, CustomEndpointReachability};
 use url::Url;
 use warp_editor::editor::NavigationKey;
 use warpui::elements::{
@@ -37,6 +37,7 @@ pub enum CustomEndpointModalEvent {
         name: String,
         url: String,
         api_key: String,
+        reachability: CustomEndpointReachability,
         models: Vec<(String, Option<String>, Option<String>)>,
     },
     SaveEndpoint {
@@ -44,6 +45,7 @@ pub enum CustomEndpointModalEvent {
         name: String,
         url: String,
         api_key: String,
+        reachability: CustomEndpointReachability,
         models: Vec<(String, Option<String>, Option<String>)>,
     },
     RemoveEndpoint {
@@ -58,6 +60,7 @@ pub enum CustomEndpointModalAction {
     AddModel,
     RemoveModel(usize),
     RemoveEndpoint,
+    ToggleLocalClientReachable,
 }
 
 struct ModelRow {
@@ -75,8 +78,10 @@ pub struct CustomEndpointModal {
     cancel_button_mouse_state: MouseStateHandle,
     save_button_mouse_state: MouseStateHandle,
     add_model_button_mouse_state: MouseStateHandle,
+    local_client_reachable_mouse_state: MouseStateHandle,
     remove_endpoint_button: ViewHandle<ActionButton>,
     editing_index: Option<usize>,
+    reachability: CustomEndpointReachability,
     url_has_error: bool,
 }
 
@@ -188,8 +193,12 @@ impl CustomEndpointModal {
             me.handle_endpoint_url_event(event, ctx);
         });
         // Validate initial URL (if any) so the error state is accurate on open.
+        let reachability = endpoint
+            .map(|endpoint| endpoint.reachability)
+            .unwrap_or_default();
         let initial_url = endpoint_url_editor.as_ref(ctx).buffer_text(ctx);
-        let url_has_error = !initial_url.trim().is_empty() && validate_url(&initial_url).is_err();
+        let url_has_error =
+            !initial_url.trim().is_empty() && validate_url(&initial_url, reachability).is_err();
         ctx.subscribe_to_view(&api_key_editor, |me, _, event, ctx| {
             me.handle_api_key_event(event, ctx);
         });
@@ -219,8 +228,10 @@ impl CustomEndpointModal {
             cancel_button_mouse_state: Default::default(),
             save_button_mouse_state: Default::default(),
             add_model_button_mouse_state: Default::default(),
+            local_client_reachable_mouse_state: Default::default(),
             remove_endpoint_button,
             editing_index,
+            reachability,
             url_has_error,
         }
     }
@@ -288,6 +299,9 @@ impl CustomEndpointModal {
         ctx: &mut ViewContext<Self>,
     ) {
         self.editing_index = editing_index;
+        self.reachability = endpoint
+            .map(|endpoint| endpoint.reachability)
+            .unwrap_or_default();
         self.endpoint_name_editor.update(ctx, |editor, ctx| {
             editor.set_buffer_text(endpoint.map(|e| e.name.as_str()).unwrap_or(""), ctx);
         });
@@ -295,7 +309,8 @@ impl CustomEndpointModal {
             editor.set_buffer_text(endpoint.map(|e| e.url.as_str()).unwrap_or(""), ctx);
         });
         let url = self.endpoint_url_editor.as_ref(ctx).buffer_text(ctx);
-        self.url_has_error = !url.trim().is_empty() && validate_url(&url).is_err();
+        self.url_has_error =
+            !url.trim().is_empty() && validate_url(&url, self.reachability).is_err();
         self.api_key_editor.update(ctx, |editor, ctx| {
             editor.set_buffer_text(endpoint.map(|e| e.api_key.as_str()).unwrap_or(""), ctx);
         });
@@ -414,6 +429,7 @@ impl CustomEndpointModal {
                 name,
                 url,
                 api_key,
+                reachability: self.reachability,
                 models,
             });
         } else {
@@ -421,6 +437,7 @@ impl CustomEndpointModal {
                 name,
                 url,
                 api_key,
+                reachability: self.reachability,
                 models,
             });
         }
@@ -465,7 +482,13 @@ impl CustomEndpointModal {
                 .trim()
                 .is_empty()
         });
-        is_endpoint_form_valid(&name, &url, &api_key, has_models)
+        is_endpoint_form_valid_for_reachability(
+            &name,
+            &url,
+            &api_key,
+            has_models,
+            self.reachability,
+        )
     }
 
     fn focus_next_editor(&self, current: &ViewHandle<EditorView>, ctx: &mut ViewContext<Self>) {
@@ -550,7 +573,8 @@ impl CustomEndpointModal {
     fn validate_url_field(&mut self, ctx: &mut ViewContext<Self>) -> bool {
         let url = self.endpoint_url_editor.as_ref(ctx).buffer_text(ctx);
         let had_error = self.url_has_error;
-        self.url_has_error = !url.trim().is_empty() && validate_url(&url).is_err();
+        self.url_has_error =
+            !url.trim().is_empty() && validate_url(&url, self.reachability).is_err();
         let changed = self.url_has_error != had_error;
         if changed {
             ctx.notify();
@@ -723,6 +747,58 @@ impl View for CustomEndpointModal {
             .finish(),
         );
 
+        let local_client_reachable =
+            self.reachability == CustomEndpointReachability::LocalClientReachable;
+        column.add_child(
+            Container::new(
+                Flex::row()
+                    .with_cross_axis_alignment(CrossAxisAlignment::Center)
+                    .with_child(
+                        appearance
+                            .ui_builder()
+                            .checkbox(self.local_client_reachable_mouse_state.clone(), None)
+                            .check(local_client_reachable)
+                            .build()
+                            .on_click(move |ctx, _, _| {
+                                ctx.dispatch_typed_action(
+                                    CustomEndpointModalAction::ToggleLocalClientReachable,
+                                );
+                            })
+                            .finish(),
+                    )
+                    .with_child(
+                        Container::new(
+                            Text::new(
+                                "Reachable only from this device",
+                                appearance.ui_font_family(),
+                                LABEL_FONT_SIZE,
+                            )
+                            .with_color(theme.active_ui_text_color().into())
+                            .finish(),
+                        )
+                        .with_margin_left(4.)
+                        .finish(),
+                    )
+                    .finish(),
+            )
+            .with_margin_bottom(6.)
+            .finish(),
+        );
+        column.add_child(
+            Container::new(
+                Text::new(
+                    "Use this for localhost, .local, or private network OpenAI-compatible gateways. Warp will not send this endpoint URL or API key to its server.",
+                    appearance.ui_font_family(),
+                    LABEL_FONT_SIZE,
+                )
+                .with_color(theme.nonactive_ui_text_color().into())
+                .soft_wrap(true)
+                .finish(),
+            )
+            .with_margin_bottom(16.)
+            .finish(),
+        );
+
         // Model rows
         let has_remove_model_button = self.model_rows.len() > 1;
         let mut model_labels = Flex::row()
@@ -890,29 +966,56 @@ impl View for CustomEndpointModal {
     }
 }
 
-fn validate_url(url: &str) -> Result<(), &'static str> {
+fn validate_url(url: &str, reachability: CustomEndpointReachability) -> Result<(), &'static str> {
     if url.trim().is_empty() {
         return Ok(());
     }
     let parsed = Url::parse(url).map_err(|_| "Invalid URL")?;
-    if parsed.scheme() != "https" {
-        return Err("URL must use HTTPS");
+    match reachability {
+        CustomEndpointReachability::RemoteServerReachable => {
+            if parsed.scheme() != "https" {
+                return Err("URL must use HTTPS");
+            }
+        }
+        CustomEndpointReachability::LocalClientReachable => {
+            if !matches!(parsed.scheme(), "http" | "https") {
+                return Err("URL must use HTTP or HTTPS");
+            }
+        }
     }
     let Some(host) = parsed.host_str().filter(|h| !h.is_empty()) else {
         return Err("URL must include a host");
     };
-    if is_restricted_host(host) {
+    if reachability == CustomEndpointReachability::RemoteServerReachable && is_restricted_host(host)
+    {
         return Err("URL must not use a local or private host");
     }
     Ok(())
 }
 
 fn is_endpoint_form_valid(name: &str, url: &str, api_key: &str, has_models: bool) -> bool {
+    is_endpoint_form_valid_for_reachability(
+        name,
+        url,
+        api_key,
+        has_models,
+        CustomEndpointReachability::RemoteServerReachable,
+    )
+}
+
+fn is_endpoint_form_valid_for_reachability(
+    name: &str,
+    url: &str,
+    api_key: &str,
+    has_models: bool,
+    reachability: CustomEndpointReachability,
+) -> bool {
     !name.trim().is_empty()
         && !url.trim().is_empty()
-        && !api_key.trim().is_empty()
+        && (reachability == CustomEndpointReachability::LocalClientReachable
+            || !api_key.trim().is_empty())
         && has_models
-        && validate_url(url).is_ok()
+        && validate_url(url, reachability).is_ok()
 }
 
 fn is_restricted_host(host: &str) -> bool {
@@ -968,6 +1071,18 @@ impl TypedActionView for CustomEndpointModal {
                 if let Some(index) = self.editing_index {
                     ctx.emit(CustomEndpointModalEvent::RemoveEndpoint { index });
                 }
+            }
+            CustomEndpointModalAction::ToggleLocalClientReachable => {
+                self.reachability = match self.reachability {
+                    CustomEndpointReachability::RemoteServerReachable => {
+                        CustomEndpointReachability::LocalClientReachable
+                    }
+                    CustomEndpointReachability::LocalClientReachable => {
+                        CustomEndpointReachability::RemoteServerReachable
+                    }
+                };
+                self.validate_url_field(ctx);
+                ctx.notify();
             }
         }
     }

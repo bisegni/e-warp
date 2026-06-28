@@ -1,6 +1,7 @@
 pub mod iap;
 
 use std::future::Future;
+use std::net::IpAddr;
 use std::pin::Pin;
 use std::sync::Arc;
 use std::time::Duration;
@@ -70,6 +71,79 @@ pub struct Client {
     /// headers on outbound requests to the Warp staging server. Wired in by
     /// the app layer on IAP-enabled builds (staging).
     iap_token_provider: Option<Arc<dyn IapTokenProvider>>,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum DestinationClass {
+    WarpService,
+    Internet,
+    LocalEndpoint,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum NetworkAccessPolicy {
+    Online,
+    Offline { allow_local_network: bool },
+}
+
+impl NetworkAccessPolicy {
+    pub fn current() -> Self {
+        if cfg!(feature = "offline") {
+            Self::Offline {
+                allow_local_network: std::env::var("WARP_OFFLINE_ALLOW_LOCAL_NETWORK")
+                    .is_ok_and(|value| value == "1"),
+            }
+        } else {
+            Self::Online
+        }
+    }
+
+    pub fn allows(self, destination: DestinationClass) -> bool {
+        match self {
+            Self::Online => true,
+            Self::Offline {
+                allow_local_network,
+            } => allow_local_network && destination == DestinationClass::LocalEndpoint,
+        }
+    }
+}
+
+pub fn classify_destination(url: &reqwest::Url) -> DestinationClass {
+    let Some(host) = url.host_str() else {
+        return DestinationClass::Internet;
+    };
+    let host = host.trim_end_matches('.').to_ascii_lowercase();
+
+    if host == "warp.dev" || host.ends_with(".warp.dev") {
+        return DestinationClass::WarpService;
+    }
+    if host == "localhost" || host.ends_with(".localhost") || host.ends_with(".local") {
+        return DestinationClass::LocalEndpoint;
+    }
+    if host
+        .parse::<IpAddr>()
+        .is_ok_and(|address| is_local_address(address))
+    {
+        return DestinationClass::LocalEndpoint;
+    }
+    DestinationClass::Internet
+}
+
+fn is_local_address(address: IpAddr) -> bool {
+    match address {
+        IpAddr::V4(address) => {
+            address.is_loopback()
+                || address.is_private()
+                || address.is_link_local()
+                || address.is_unspecified()
+        }
+        IpAddr::V6(address) => {
+            address.is_loopback()
+                || address.is_unicast_link_local()
+                || address.is_unique_local()
+                || address.is_unspecified()
+        }
+    }
 }
 
 /// Type for 'hook' functions to be executed prior to sending a request. A reference to the
@@ -183,10 +257,17 @@ impl Client {
 
     fn builder(
         &self,
-        wrapped: reqwest::RequestBuilder,
+        mut wrapped: reqwest::RequestBuilder,
+        destination: Option<DestinationClass>,
         include_warp_headers: bool,
         iap_token: Option<String>,
     ) -> RequestBuilder<'_> {
+        if destination
+            .is_some_and(|destination| !NetworkAccessPolicy::current().allows(destination))
+        {
+            // Put reqwest into its builder-error state. Sending then fails before DNS or socket I/O.
+            wrapped = wrapped.header("\n", "offline-mode-blocked");
+        }
         let mut builder = RequestBuilder {
             wrapped,
             client: self,
@@ -209,31 +290,81 @@ impl Client {
     pub fn get<U: IntoUrl + Clone>(&self, url: U) -> RequestBuilder<'_> {
         let include_warp_headers = Self::include_warp_http_headers(url.clone());
         let iap_token = self.iap_token_for(url.clone());
-        self.builder(self.wrapped.get(url), include_warp_headers, iap_token)
+        let destination = url
+            .clone()
+            .into_url()
+            .ok()
+            .map(|url| classify_destination(&url));
+        self.builder(
+            self.wrapped.get(url),
+            destination,
+            include_warp_headers,
+            iap_token,
+        )
     }
 
     pub fn post<U: IntoUrl + Clone>(&self, url: U) -> RequestBuilder<'_> {
         let include_warp_headers = Self::include_warp_http_headers(url.clone());
         let iap_token = self.iap_token_for(url.clone());
-        self.builder(self.wrapped.post(url), include_warp_headers, iap_token)
+        let destination = url
+            .clone()
+            .into_url()
+            .ok()
+            .map(|url| classify_destination(&url));
+        self.builder(
+            self.wrapped.post(url),
+            destination,
+            include_warp_headers,
+            iap_token,
+        )
     }
 
     pub fn put<U: IntoUrl + Clone>(&self, url: U) -> RequestBuilder<'_> {
         let include_warp_headers = Self::include_warp_http_headers(url.clone());
         let iap_token = self.iap_token_for(url.clone());
-        self.builder(self.wrapped.put(url), include_warp_headers, iap_token)
+        let destination = url
+            .clone()
+            .into_url()
+            .ok()
+            .map(|url| classify_destination(&url));
+        self.builder(
+            self.wrapped.put(url),
+            destination,
+            include_warp_headers,
+            iap_token,
+        )
     }
 
     pub fn patch<U: IntoUrl + Clone>(&self, url: U) -> RequestBuilder<'_> {
         let include_warp_headers = Self::include_warp_http_headers(url.clone());
         let iap_token = self.iap_token_for(url.clone());
-        self.builder(self.wrapped.patch(url), include_warp_headers, iap_token)
+        let destination = url
+            .clone()
+            .into_url()
+            .ok()
+            .map(|url| classify_destination(&url));
+        self.builder(
+            self.wrapped.patch(url),
+            destination,
+            include_warp_headers,
+            iap_token,
+        )
     }
 
     pub fn delete<U: IntoUrl + Clone>(&self, url: U) -> RequestBuilder<'_> {
         let include_warp_headers = Self::include_warp_http_headers(url.clone());
         let iap_token = self.iap_token_for(url.clone());
-        self.builder(self.wrapped.delete(url), include_warp_headers, iap_token)
+        let destination = url
+            .clone()
+            .into_url()
+            .ok()
+            .map(|url| classify_destination(&url));
+        self.builder(
+            self.wrapped.delete(url),
+            destination,
+            include_warp_headers,
+            iap_token,
+        )
     }
 
     /// Returns the IAP bearer token to attach to a request targeting
@@ -740,14 +871,17 @@ impl<'c> oauth2::AsyncHttpClient<'c> for Client {
         Box::pin(async move {
             let uri = request.uri().to_string();
             let include_warp_headers = Self::include_warp_http_headers(uri.clone());
-            let iap_token = self.iap_token_for(uri);
+            let iap_token = self.iap_token_for(uri.clone());
+            let destination = reqwest::Url::parse(&uri)
+                .ok()
+                .map(|url| classify_destination(&url));
             let builder = reqwest::RequestBuilder::from_parts(
                 self.wrapped.clone(),
                 request.try_into().map_err(Box::new)?,
             );
 
             let response = self
-                .builder(builder, include_warp_headers, iap_token)
+                .builder(builder, destination, include_warp_headers, iap_token)
                 .send()
                 .await
                 .map_err(Box::new)?;
@@ -792,5 +926,50 @@ mod origin_tests {
     fn third_party_origin_does_not_match() {
         let url = reqwest::Url::parse("https://evil.example.com/graphql/v2").unwrap();
         assert!(!is_warp_server_origin(&url));
+    }
+
+    #[test]
+    fn classifies_offline_destinations() {
+        let cases = [
+            (
+                "https://app.warp.dev/graphql",
+                DestinationClass::WarpService,
+            ),
+            ("https://example.com", DestinationClass::Internet),
+            ("http://localhost:11434/v1", DestinationClass::LocalEndpoint),
+            ("http://127.0.0.1:8080/v1", DestinationClass::LocalEndpoint),
+            (
+                "http://192.168.1.12:8080/v1",
+                DestinationClass::LocalEndpoint,
+            ),
+            (
+                "https://slacstudio.local:4443/v1",
+                DestinationClass::LocalEndpoint,
+            ),
+        ];
+
+        for (url, expected) in cases {
+            assert_eq!(
+                classify_destination(&reqwest::Url::parse(url).unwrap()),
+                expected
+            );
+        }
+    }
+
+    #[test]
+    fn offline_policy_blocks_everything_except_opted_in_local_endpoints() {
+        let blocked = NetworkAccessPolicy::Offline {
+            allow_local_network: false,
+        };
+        assert!(!blocked.allows(DestinationClass::WarpService));
+        assert!(!blocked.allows(DestinationClass::Internet));
+        assert!(!blocked.allows(DestinationClass::LocalEndpoint));
+
+        let local_allowed = NetworkAccessPolicy::Offline {
+            allow_local_network: true,
+        };
+        assert!(local_allowed.allows(DestinationClass::LocalEndpoint));
+        assert!(!local_allowed.allows(DestinationClass::WarpService));
+        assert!(!local_allowed.allows(DestinationClass::Internet));
     }
 }

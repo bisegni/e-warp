@@ -28,6 +28,12 @@ path = "src/bin/local.rs"
 test = false
 
 [[bin]]
+name = "warp-offline"
+path = "src/bin/offline.rs"
+required-features = ["offline"]
+test = false
+
+[[bin]]
 name = "integration"
 path = "src/bin/integration.rs"
 test = false
@@ -463,6 +469,7 @@ embed-resource = "3.0"
 
 # Note that we support channel-specific enables for these features
 [features]
+offline = ["ai/offline", "http_client/offline", "skip_login"]
 tui = []
 ai_resume_button = []
 autoupdate = []

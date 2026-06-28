@@ -11,11 +11,28 @@ use crate::ai::agent::redaction;
 use crate::server::server_api::{AIApiError, ServerApi};
 use crate::terminal::model::session::SessionType;
 
+#[cfg(feature = "offline")]
+mod local_runtime;
+
 pub async fn generate_multi_agent_output(
     server_api: Arc<ServerApi>,
     mut params: RequestParams,
     cancellation_rx: futures::channel::oneshot::Receiver<()>,
 ) -> Result<ResponseStream, ConvertToAPITypeError> {
+    #[cfg(feature = "offline")]
+    if params.ambient_agent_task_id.is_none()
+        && matches!(
+            params.session_context.session_type(),
+            None | Some(SessionType::Local)
+        )
+    {
+        return Ok(local_runtime::generate(params, cancellation_rx).await);
+    }
+
+    if let Some(error) = local_custom_endpoint_error(&params) {
+        return Ok(single_error_stream(error).await);
+    }
+
     let supported_tools = params
         .supported_tools_override
         .take()
@@ -150,14 +167,35 @@ pub async fn generate_multi_agent_output(
                 .take_until(cancellation_rx);
             Ok(Box::pin(output_stream))
         }
-        Err(e) => {
-            let (tx, rx) = async_channel::unbounded();
-            let _ = tx
-                .send(Err(convert_multi_agent_client_error(e).await))
-                .await;
-            Ok(Box::pin(rx))
-        }
+        Err(e) => Ok(single_error_stream(convert_multi_agent_client_error(e).await).await),
     }
+}
+
+async fn single_error_stream(error: Arc<AIApiError>) -> ResponseStream {
+    let (tx, rx) = async_channel::unbounded();
+    let _ = tx.send(Err(error)).await;
+    Box::pin(rx)
+}
+
+fn local_custom_endpoint_error(params: &RequestParams) -> Option<Arc<AIApiError>> {
+    if params.local_custom_model_config_keys.is_empty() {
+        return None;
+    }
+
+    if params.ambient_agent_task_id.is_some()
+        || !matches!(
+            params.session_context.session_type(),
+            None | Some(SessionType::Local)
+        )
+    {
+        return Some(Arc::new(AIApiError::Other(anyhow::anyhow!(
+            "This model is reachable only from this device. Use desktop Agent Mode or choose a remote-reachable endpoint."
+        ))));
+    }
+
+    Some(Arc::new(AIApiError::Other(anyhow::anyhow!(
+        "This local inference endpoint is configured on this device, but the connected Warp multi-agent server does not support desktop local-model relay yet. Update warp-server/warp-proto-apis to a build with LocalModelCompletion relay support, or choose a remote-reachable endpoint."
+    ))))
 }
 
 async fn convert_multi_agent_client_error(
