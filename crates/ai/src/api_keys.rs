@@ -50,6 +50,7 @@ pub struct CustomEndpoint {
     pub url: String,
     pub api_key: String,
     pub reachability: CustomEndpointReachability,
+    pub allow_invalid_tls_certificates: bool,
     pub models: Vec<CustomEndpointModel>,
 }
 
@@ -318,6 +319,7 @@ impl ApiKeyManager {
         url: String,
         api_key: String,
         reachability: CustomEndpointReachability,
+        allow_invalid_tls_certificates: bool,
         models: Vec<(String, Option<String>, Option<String>)>,
         ctx: &mut ModelContext<Self>,
     ) {
@@ -327,6 +329,7 @@ impl ApiKeyManager {
             url,
             api_key,
             reachability,
+            allow_invalid_tls_certificates,
             models: models
                 .into_iter()
                 .map(|(name, alias, config_key)| CustomEndpointModel {
@@ -349,6 +352,7 @@ impl ApiKeyManager {
         url: String,
         api_key: String,
         reachability: CustomEndpointReachability,
+        allow_invalid_tls_certificates: bool,
         models: Vec<(String, Option<String>, Option<String>)>,
         ctx: &mut ModelContext<Self>,
     ) {
@@ -361,6 +365,7 @@ impl ApiKeyManager {
             url,
             api_key,
             reachability,
+            allow_invalid_tls_certificates,
             models: models
                 .into_iter()
                 .map(|(name, alias, config_key)| CustomEndpointModel {

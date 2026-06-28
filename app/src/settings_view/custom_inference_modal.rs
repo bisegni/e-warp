@@ -38,6 +38,7 @@ pub enum CustomEndpointModalEvent {
         url: String,
         api_key: String,
         reachability: CustomEndpointReachability,
+        allow_invalid_tls_certificates: bool,
         models: Vec<(String, Option<String>, Option<String>)>,
     },
     SaveEndpoint {
@@ -46,6 +47,7 @@ pub enum CustomEndpointModalEvent {
         url: String,
         api_key: String,
         reachability: CustomEndpointReachability,
+        allow_invalid_tls_certificates: bool,
         models: Vec<(String, Option<String>, Option<String>)>,
     },
     RemoveEndpoint {
@@ -61,6 +63,7 @@ pub enum CustomEndpointModalAction {
     RemoveModel(usize),
     RemoveEndpoint,
     ToggleLocalClientReachable,
+    ToggleAllowInvalidTlsCertificates,
 }
 
 struct ModelRow {
@@ -79,9 +82,11 @@ pub struct CustomEndpointModal {
     save_button_mouse_state: MouseStateHandle,
     add_model_button_mouse_state: MouseStateHandle,
     local_client_reachable_mouse_state: MouseStateHandle,
+    allow_invalid_tls_certificates_mouse_state: MouseStateHandle,
     remove_endpoint_button: ViewHandle<ActionButton>,
     editing_index: Option<usize>,
     reachability: CustomEndpointReachability,
+    allow_invalid_tls_certificates: bool,
     url_has_error: bool,
 }
 
@@ -196,6 +201,8 @@ impl CustomEndpointModal {
         let reachability = endpoint
             .map(|endpoint| endpoint.reachability)
             .unwrap_or_default();
+        let allow_invalid_tls_certificates =
+            endpoint.is_some_and(|endpoint| endpoint.allow_invalid_tls_certificates);
         let initial_url = endpoint_url_editor.as_ref(ctx).buffer_text(ctx);
         let url_has_error =
             !initial_url.trim().is_empty() && validate_url(&initial_url, reachability).is_err();
@@ -229,9 +236,11 @@ impl CustomEndpointModal {
             save_button_mouse_state: Default::default(),
             add_model_button_mouse_state: Default::default(),
             local_client_reachable_mouse_state: Default::default(),
+            allow_invalid_tls_certificates_mouse_state: Default::default(),
             remove_endpoint_button,
             editing_index,
             reachability,
+            allow_invalid_tls_certificates,
             url_has_error,
         }
     }
@@ -302,6 +311,8 @@ impl CustomEndpointModal {
         self.reachability = endpoint
             .map(|endpoint| endpoint.reachability)
             .unwrap_or_default();
+        self.allow_invalid_tls_certificates =
+            endpoint.is_some_and(|endpoint| endpoint.allow_invalid_tls_certificates);
         self.endpoint_name_editor.update(ctx, |editor, ctx| {
             editor.set_buffer_text(endpoint.map(|e| e.name.as_str()).unwrap_or(""), ctx);
         });
@@ -430,6 +441,7 @@ impl CustomEndpointModal {
                 url,
                 api_key,
                 reachability: self.reachability,
+                allow_invalid_tls_certificates: self.allow_invalid_tls_certificates,
                 models,
             });
         } else {
@@ -438,6 +450,7 @@ impl CustomEndpointModal {
                 url,
                 api_key,
                 reachability: self.reachability,
+                allow_invalid_tls_certificates: self.allow_invalid_tls_certificates,
                 models,
             });
         }
@@ -798,6 +811,46 @@ impl View for CustomEndpointModal {
             .with_margin_bottom(16.)
             .finish(),
         );
+        if local_client_reachable {
+            column.add_child(
+                Container::new(
+                    Flex::row()
+                        .with_cross_axis_alignment(CrossAxisAlignment::Center)
+                        .with_child(
+                            appearance
+                                .ui_builder()
+                                .checkbox(
+                                    self.allow_invalid_tls_certificates_mouse_state.clone(),
+                                    None,
+                                )
+                                .check(self.allow_invalid_tls_certificates)
+                                .build()
+                                .on_click(move |ctx, _, _| {
+                                    ctx.dispatch_typed_action(
+                                        CustomEndpointModalAction::ToggleAllowInvalidTlsCertificates,
+                                    );
+                                })
+                                .finish(),
+                        )
+                        .with_child(
+                            Container::new(
+                                Text::new(
+                                    "Allow untrusted TLS certificates",
+                                    appearance.ui_font_family(),
+                                    LABEL_FONT_SIZE,
+                                )
+                                .with_color(theme.active_ui_text_color().into())
+                                .finish(),
+                            )
+                            .with_margin_left(4.)
+                            .finish(),
+                        )
+                        .finish(),
+                )
+                .with_margin_bottom(16.)
+                .finish(),
+            );
+        }
 
         // Model rows
         let has_remove_model_button = self.model_rows.len() > 1;
@@ -1082,6 +1135,10 @@ impl TypedActionView for CustomEndpointModal {
                     }
                 };
                 self.validate_url_field(ctx);
+                ctx.notify();
+            }
+            CustomEndpointModalAction::ToggleAllowInvalidTlsCertificates => {
+                self.allow_invalid_tls_certificates = !self.allow_invalid_tls_certificates;
                 ctx.notify();
             }
         }

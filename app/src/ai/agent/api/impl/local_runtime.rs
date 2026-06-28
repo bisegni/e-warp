@@ -1,7 +1,8 @@
 use std::sync::Arc;
+use std::time::Duration;
 
 use futures::channel::oneshot;
-use futures_util::{stream, StreamExt};
+use futures_util::{stream, FutureExt, StreamExt};
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 use warp_multi_agent_api as api;
@@ -109,19 +110,37 @@ async fn run(
         parallel_tool_calls: false,
         stream: false,
     };
-    let client = reqwest::Client::new();
-    let mut builder = client.post(parsed_url).json(&request);
-    if !endpoint.api_key.trim().is_empty() {
-        builder = builder.bearer_auth(&endpoint.api_key);
-    }
-    let response = futures::future::select(
-        Box::pin(async move { builder.send().await }),
-        Box::pin(cancellation_rx),
-    )
-    .await;
-    let response = match response {
-        futures::future::Either::Left((response, _)) => response?,
-        futures::future::Either::Right(_) => anyhow::bail!("Local Agent request cancelled."),
+    let client = reqwest::Client::builder()
+        .danger_accept_invalid_certs(endpoint.allow_invalid_tls_certificates)
+        .connect_timeout(Duration::from_secs(5))
+        .build()?;
+    let cancellation_rx = cancellation_rx.fuse();
+    futures::pin_mut!(cancellation_rx);
+    let mut attempt = 0;
+    let response = loop {
+        let mut builder = client.post(parsed_url.clone()).json(&request);
+        if !endpoint.api_key.trim().is_empty() {
+            builder = builder.bearer_auth(&endpoint.api_key);
+        }
+        let send = builder.send().fuse();
+        futures::pin_mut!(send);
+        let result = futures::select! {
+            result = send => result,
+            _ = cancellation_rx => anyhow::bail!("Local Agent request cancelled."),
+        };
+        match result {
+            Ok(response) => break response,
+            Err(error) if error.is_connect() && attempt < 4 => {
+                let delay = tokio::time::sleep(Duration::from_secs(1 << attempt)).fuse();
+                futures::pin_mut!(delay);
+                futures::select! {
+                    _ = delay => {},
+                    _ = cancellation_rx => anyhow::bail!("Local Agent request cancelled."),
+                }
+                attempt += 1;
+            }
+            Err(error) => return Err(error.into()),
+        }
     };
     let status = response.status();
     let body = response.text().await?;
@@ -228,14 +247,14 @@ fn tool_definitions() -> Vec<serde_json::Value> {
             "file_glob",
             "Find files by glob patterns",
             serde_json::json!({
-                "type": "object", "properties": { "patterns": { "type": "array", "items": { "type": "string" } }, "path": { "type": "string" } }, "required": ["patterns"]
+                "type": "object", "properties": { "pattern": { "type": "string" }, "path": { "type": "string" } }, "required": ["pattern"]
             }),
         ),
         tool_definition(
             "grep",
             "Search file contents",
             serde_json::json!({
-                "type": "object", "properties": { "queries": { "type": "array", "items": { "type": "string" } }, "path": { "type": "string" } }, "required": ["queries"]
+                "type": "object", "properties": { "query": { "type": "string" }, "path": { "type": "string" } }, "required": ["query"]
             }),
         ),
         tool_definition(
@@ -267,7 +286,7 @@ fn tool_call_events(
         .map_err(|_| anyhow::anyhow!("The local model returned malformed tool arguments."))?;
     let tool = match call.function.name.as_str() {
         "read_files" => {
-            let paths = string_array(&arguments, "paths")?;
+            let paths = string_list_argument(&arguments, "paths", &["path", "files", "file"])?;
             api::message::tool_call::Tool::ReadFiles(api::message::tool_call::ReadFiles {
                 files: paths
                     .into_iter()
@@ -280,18 +299,26 @@ fn tool_call_events(
         }
         "file_glob" => {
             api::message::tool_call::Tool::FileGlobV2(api::message::tool_call::FileGlobV2 {
-                patterns: string_array(&arguments, "patterns")?,
-                search_dir: optional_string(&arguments, "path"),
+                patterns: string_list_argument(
+                    &arguments,
+                    "patterns",
+                    &["pattern", "globs", "glob"],
+                )?,
+                search_dir: optional_string_any(&arguments, &["path", "search_dir", "directory"]),
                 ..Default::default()
             })
         }
         "grep" => api::message::tool_call::Tool::Grep(api::message::tool_call::Grep {
-            queries: string_array(&arguments, "queries")?,
-            path: optional_string(&arguments, "path"),
+            queries: string_list_argument(
+                &arguments,
+                "queries",
+                &["query", "patterns", "pattern"],
+            )?,
+            path: optional_string_any(&arguments, &["path", "search_dir", "directory"]),
         }),
         "run_shell_command" => api::message::tool_call::Tool::RunShellCommand(
             api::message::tool_call::RunShellCommand {
-                command: required_string(&arguments, "command")?,
+                command: required_string_any(&arguments, &["command", "cmd"])?,
                 ..Default::default()
             },
         ),
@@ -306,32 +333,40 @@ fn tool_call_events(
     ))
 }
 
-fn string_array(value: &serde_json::Value, key: &str) -> anyhow::Result<Vec<String>> {
-    value
-        .get(key)
-        .and_then(serde_json::Value::as_array)
-        .ok_or_else(|| anyhow::anyhow!("Missing tool argument `{key}`."))?
+fn string_list_argument(
+    value: &serde_json::Value,
+    canonical_key: &str,
+    aliases: &[&str],
+) -> anyhow::Result<Vec<String>> {
+    let argument = std::iter::once(canonical_key)
+        .chain(aliases.iter().copied())
+        .find_map(|key| value.get(key))
+        .ok_or_else(|| anyhow::anyhow!("Missing tool argument `{canonical_key}`."))?;
+    if let Some(single) = argument.as_str() {
+        return Ok(vec![single.to_owned()]);
+    }
+    argument
+        .as_array()
+        .ok_or_else(|| anyhow::anyhow!("Invalid tool argument `{canonical_key}`."))?
         .iter()
         .map(|item| {
             item.as_str()
                 .map(str::to_owned)
-                .ok_or_else(|| anyhow::anyhow!("Invalid tool argument `{key}`."))
+                .ok_or_else(|| anyhow::anyhow!("Invalid tool argument `{canonical_key}`."))
         })
         .collect()
 }
 
-fn required_string(value: &serde_json::Value, key: &str) -> anyhow::Result<String> {
-    value
-        .get(key)
-        .and_then(serde_json::Value::as_str)
+fn required_string_any(value: &serde_json::Value, keys: &[&str]) -> anyhow::Result<String> {
+    keys.iter()
+        .find_map(|key| value.get(key).and_then(serde_json::Value::as_str))
         .map(str::to_owned)
-        .ok_or_else(|| anyhow::anyhow!("Missing tool argument `{key}`."))
+        .ok_or_else(|| anyhow::anyhow!("Missing tool argument `{}`.", keys[0]))
 }
 
-fn optional_string(value: &serde_json::Value, key: &str) -> String {
-    value
-        .get(key)
-        .and_then(serde_json::Value::as_str)
+fn optional_string_any(value: &serde_json::Value, keys: &[&str]) -> String {
+    keys.iter()
+        .find_map(|key| value.get(key).and_then(serde_json::Value::as_str))
         .unwrap_or_default()
         .to_owned()
 }
@@ -377,9 +412,9 @@ fn message_events(
         .map(|token| token.as_str().to_owned())
         .unwrap_or_else(|| Uuid::new_v4().to_string());
     let task_id = params
-        .tasks
-        .first()
-        .map(|task| task.id.clone())
+        .local_task_id
+        .clone()
+        .or_else(|| params.tasks.first().map(|task| task.id.clone()))
         .unwrap_or_else(|| Uuid::new_v4().to_string());
     let message = api::Message {
         id: Uuid::new_v4().to_string(),
@@ -388,6 +423,31 @@ fn message_events(
         message: Some(message_type),
         ..Default::default()
     };
+    let mut actions = Vec::new();
+    if params.tasks.is_empty() {
+        actions.push(api::ClientAction {
+            action: Some(api::client_action::Action::CreateTask(
+                api::client_action::CreateTask {
+                    task: Some(api::Task {
+                        id: task_id.clone(),
+                        messages: vec![],
+                        dependencies: None,
+                        description: String::new(),
+                        summary: String::new(),
+                        server_data: String::new(),
+                    }),
+                },
+            )),
+        });
+    }
+    actions.push(api::ClientAction {
+        action: Some(api::client_action::Action::AddMessagesToTask(
+            api::client_action::AddMessagesToTask {
+                task_id,
+                messages: vec![message],
+            },
+        )),
+    });
     vec![
         api::ResponseEvent {
             r#type: Some(api::response_event::Type::Init(
@@ -400,16 +460,7 @@ fn message_events(
         },
         api::ResponseEvent {
             r#type: Some(api::response_event::Type::ClientActions(
-                api::response_event::ClientActions {
-                    actions: vec![api::ClientAction {
-                        action: Some(api::client_action::Action::AddMessagesToTask(
-                            api::client_action::AddMessagesToTask {
-                                task_id,
-                                messages: vec![message],
-                            },
-                        )),
-                    }],
-                },
+                api::response_event::ClientActions { actions },
             )),
         },
         api::ResponseEvent {
@@ -423,4 +474,58 @@ fn message_events(
             )),
         },
     ]
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn response_events_target_the_request_input_task() {
+        let mut params = RequestParams::new_for_test();
+        params.local_task_id = Some("optimistic-root-task".to_string());
+
+        let events = response_events(&params, "hello".to_string());
+        let actions = match events[1].r#type.as_ref() {
+            Some(api::response_event::Type::ClientActions(actions)) => actions,
+            event => panic!("expected client actions, got {event:?}"),
+        };
+        assert!(matches!(
+            actions.actions[0].action,
+            Some(api::client_action::Action::CreateTask(_))
+        ));
+        let add = match actions.actions[1].action.as_ref() {
+            Some(api::client_action::Action::AddMessagesToTask(add)) => add,
+            action => panic!("expected AddMessagesToTask, got {action:?}"),
+        };
+
+        assert_eq!(add.task_id, "optimistic-root-task");
+        assert_eq!(add.messages[0].task_id, "optimistic-root-task");
+    }
+
+    #[test]
+    fn tool_arguments_accept_standard_singular_and_plural_forms() {
+        assert_eq!(
+            string_list_argument(
+                &serde_json::json!({ "pattern": "*.rs" }),
+                "patterns",
+                &["pattern"]
+            )
+            .unwrap(),
+            vec!["*.rs"]
+        );
+        assert_eq!(
+            string_list_argument(
+                &serde_json::json!({ "patterns": ["*.rs", "*.toml"] }),
+                "patterns",
+                &["pattern"]
+            )
+            .unwrap(),
+            vec!["*.rs", "*.toml"]
+        );
+        assert_eq!(
+            required_string_any(&serde_json::json!({ "cmd": "pwd" }), &["command", "cmd"]).unwrap(),
+            "pwd"
+        );
+    }
 }

@@ -2367,6 +2367,7 @@ impl AISettingsPageView {
                 url,
                 api_key,
                 reachability,
+                allow_invalid_tls_certificates,
                 models,
             } => {
                 if !Self::can_use_custom_inference_controls(ctx) {
@@ -2379,6 +2380,7 @@ impl AISettingsPageView {
                         url.clone(),
                         api_key.clone(),
                         *reachability,
+                        *allow_invalid_tls_certificates,
                         models.clone(),
                         ctx,
                     );
@@ -2419,6 +2421,7 @@ impl AISettingsPageView {
                 url,
                 api_key,
                 reachability,
+                allow_invalid_tls_certificates,
                 models,
             } => {
                 if !Self::can_use_custom_inference_controls(ctx) {
@@ -2432,6 +2435,7 @@ impl AISettingsPageView {
                         url.clone(),
                         api_key.clone(),
                         *reachability,
+                        *allow_invalid_tls_certificates,
                         models.clone(),
                         ctx,
                     );

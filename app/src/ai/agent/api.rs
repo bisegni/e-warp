@@ -93,6 +93,8 @@ impl TryFrom<ServerConversationToken>
 #[derive(Debug, Clone)]
 pub struct RequestParams {
     pub input: Vec<AIAgentInput>,
+    /// Client-side task receiving synthetic events from the offline local runtime.
+    pub local_task_id: Option<String>,
     pub conversation_token: Option<ServerConversationToken>,
     pub forked_from_conversation_token: Option<ServerConversationToken>,
     pub ambient_agent_task_id: Option<AmbientAgentTaskId>,
@@ -165,6 +167,7 @@ impl RequestParams {
     pub fn new_for_test() -> Self {
         Self {
             input: vec![],
+            local_task_id: None,
             conversation_token: None,
             forked_from_conversation_token: None,
             ambient_agent_task_id: None,
@@ -410,6 +413,11 @@ impl RequestParams {
 
         Self {
             input: request_input.all_inputs().cloned().collect(),
+            local_task_id: request_input
+                .input_messages
+                .keys()
+                .next()
+                .map(ToString::to_string),
             conversation_token: conversation.server_conversation_token,
             forked_from_conversation_token: conversation.forked_from_conversation_token,
             ambient_agent_task_id: conversation.ambient_agent_task_id,

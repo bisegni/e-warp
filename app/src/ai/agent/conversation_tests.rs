@@ -270,6 +270,7 @@ fn update_cost_and_usage_resolves_custom_endpoint_alias_for_footer_usage() {
                 "https://custom.example".to_string(),
                 "key".to_string(),
                 ai::api_keys::CustomEndpointReachability::RemoteServerReachable,
+                false,
                 vec![(
                     "raw-model".to_string(),
                     Some("Friendly alias".to_string()),
@@ -355,6 +356,7 @@ fn footer_model_token_usage_keeps_custom_endpoint_usage_distinct_from_same_label
                 "https://custom.example".to_string(),
                 "key".to_string(),
                 ai::api_keys::CustomEndpointReachability::RemoteServerReachable,
+                false,
                 vec![(
                     "raw-model".to_string(),
                     Some("Resolved custom".to_string()),

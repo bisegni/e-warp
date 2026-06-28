@@ -151,6 +151,7 @@ fn endpoint(
         url: url.into(),
         api_key: api_key.into(),
         reachability: ai::api_keys::CustomEndpointReachability::RemoteServerReachable,
+        allow_invalid_tls_certificates: false,
         models,
     }
 }
@@ -390,6 +391,7 @@ fn reconcile_preserves_custom_models_saved_on_execution_profile() {
                 "https://example.com/v1".to_string(),
                 "test-key".to_string(),
                 ai::api_keys::CustomEndpointReachability::RemoteServerReachable,
+                false,
                 vec![(
                     "custom-model".to_string(),
                     Some("Custom Model".to_string()),

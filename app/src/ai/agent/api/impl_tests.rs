@@ -16,6 +16,7 @@ fn request_params_with_ask_user_question_enabled(ask_user_question_enabled: bool
 
     RequestParams {
         input: vec![],
+        local_task_id: None,
         conversation_token: None,
         forked_from_conversation_token: None,
         ambient_agent_task_id: None,

@@ -103,6 +103,7 @@ fn endpoint_with_keys(
         url: url.into(),
         api_key: api_key.into(),
         reachability: CustomEndpointReachability::RemoteServerReachable,
+        allow_invalid_tls_certificates: false,
         models: models
             .iter()
             .map(|(n, a, cfg)| CustomEndpointModel {
@@ -125,6 +126,7 @@ fn local_endpoint_with_keys(
         url: url.into(),
         api_key: api_key.into(),
         reachability: CustomEndpointReachability::LocalClientReachable,
+        allow_invalid_tls_certificates: false,
         models: models
             .iter()
             .map(|(n, a, cfg)| CustomEndpointModel {
