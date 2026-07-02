@@ -1,3 +1,4 @@
+use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -8,7 +9,10 @@ use uuid::Uuid;
 use warp_multi_agent_api as api;
 
 use super::super::{RequestParams, ResponseStream};
+use crate::ai::agent::api::convert_conversation::convert_tool_call_result_to_input;
+use crate::ai::agent::task::TaskId;
 use crate::ai::agent::AIAgentInput;
+use crate::ai::document::ai_document_model::{AIDocumentId, AIDocumentVersion};
 use crate::server::server_api::AIApiError;
 
 #[derive(Serialize)]
@@ -182,9 +186,20 @@ async fn run(
 fn conversation_messages(params: &RequestParams) -> Vec<serde_json::Value> {
     let mut messages = vec![serde_json::json!({
         "role": "system",
-        "content": "You are Warp's local terminal agent. Use tools to inspect the filesystem or run commands. Never claim a tool ran until its result is returned."
+        "content": "You are Warp's local terminal agent. Use tools to inspect the filesystem or run commands. Follow each tool's JSON schema exactly and include every required argument. Choose tools according to their documented semantics. Never claim a tool ran until its result is returned. If a tool returns an error, inspect it and retry with another appropriate tool or corrected arguments; do not replace the requested task with an unrelated response."
     })];
     for task in &params.tasks {
+        let tool_calls = task
+            .messages
+            .iter()
+            .filter_map(|message| match message.message.as_ref() {
+                Some(api::message::Message::ToolCall(call)) => {
+                    Some((call.tool_call_id.clone(), call))
+                }
+                _ => None,
+            })
+            .collect::<HashMap<_, _>>();
+        let mut document_versions = HashMap::<AIDocumentId, AIDocumentVersion>::new();
         for message in &task.messages {
             match message.message.as_ref() {
                 Some(api::message::Message::UserQuery(query)) => {
@@ -206,10 +221,16 @@ fn conversation_messages(params: &RequestParams) -> Vec<serde_json::Value> {
                     }
                 }
                 Some(api::message::Message::ToolCallResult(result)) => {
+                    let content = persisted_tool_result_content(
+                        &task.id,
+                        result,
+                        &tool_calls,
+                        &mut document_versions,
+                    );
                     messages.push(serde_json::json!({
                         "role": "tool",
                         "tool_call_id": result.tool_call_id,
-                        "content": format!("{result:?}")
+                        "content": content
                     }))
                 }
                 _ => {}
@@ -234,34 +255,86 @@ fn conversation_messages(params: &RequestParams) -> Vec<serde_json::Value> {
     messages
 }
 
+fn persisted_tool_result_content(
+    task_id: &str,
+    result: &api::message::ToolCallResult,
+    tool_calls: &HashMap<String, &api::message::ToolCall>,
+    document_versions: &mut HashMap<AIDocumentId, AIDocumentVersion>,
+) -> String {
+    convert_tool_call_result_to_input(
+        &TaskId::new(task_id.to_owned()),
+        result,
+        tool_calls,
+        document_versions,
+    )
+    .and_then(|input| match input {
+        AIAgentInput::ActionResult { result, .. } => Some(result.to_string()),
+        _ => None,
+    })
+    .unwrap_or_else(|| "Tool result unavailable.".to_string())
+}
+
 fn tool_definitions() -> Vec<serde_json::Value> {
     vec![
         tool_definition(
             "read_files",
             "Read one or more local files",
             serde_json::json!({
-                "type": "object", "properties": { "paths": { "type": "array", "items": { "type": "string" } } }, "required": ["paths"]
+                "type": "object",
+                "additionalProperties": false,
+                "properties": {
+                    "paths": {
+                        "type": "array",
+                        "description": "File paths to read.",
+                        "items": { "type": "string" },
+                        "minItems": 1
+                    }
+                },
+                "required": ["paths"]
             }),
         ),
         tool_definition(
             "file_glob",
-            "Find files by glob patterns",
+            "Recursively search for files matching one glob pattern. This walks descendants and can be expensive in a large directory. Do not use it to list only the immediate entries of a directory; use run_shell_command with an appropriate directory-listing command instead.",
             serde_json::json!({
-                "type": "object", "properties": { "pattern": { "type": "string" }, "path": { "type": "string" } }, "required": ["pattern"]
+                "type": "object",
+                "additionalProperties": false,
+                "properties": {
+                    "pattern": {
+                        "type": "string",
+                        "description": "Required filename glob pattern, for example *.rs. Matching is recursive below the search directory."
+                    },
+                    "path": {
+                        "type": "string",
+                        "description": "Optional directory to search. Omit to use the current working directory."
+                    }
+                },
+                "required": ["pattern"]
             }),
         ),
         tool_definition(
             "grep",
             "Search file contents",
             serde_json::json!({
-                "type": "object", "properties": { "query": { "type": "string" }, "path": { "type": "string" } }, "required": ["query"]
+                "type": "object",
+                "additionalProperties": false,
+                "properties": {
+                    "query": { "type": "string", "description": "Required text or regular expression to search for." },
+                    "path": { "type": "string", "description": "Optional file or directory to search." }
+                },
+                "required": ["query"]
             }),
         ),
         tool_definition(
             "run_shell_command",
-            "Run a shell command with Warp permission checks",
+            "Run a shell command with Warp permission checks. Use this for shell-native operations such as listing the immediate entries in the current directory.",
             serde_json::json!({
-                "type": "object", "properties": { "command": { "type": "string" } }, "required": ["command"]
+                "type": "object",
+                "additionalProperties": false,
+                "properties": {
+                    "command": { "type": "string", "description": "Required shell command to execute." }
+                },
+                "required": ["command"]
             }),
         ),
     ]
@@ -282,11 +355,10 @@ fn tool_call_events(
     params: &RequestParams,
     call: OpenAIToolCall,
 ) -> anyhow::Result<Vec<api::ResponseEvent>> {
-    let arguments: serde_json::Value = serde_json::from_str(&call.function.arguments)
-        .map_err(|_| anyhow::anyhow!("The local model returned malformed tool arguments."))?;
+    let arguments = parse_tool_arguments(&call.function.arguments)?;
     let tool = match call.function.name.as_str() {
         "read_files" => {
-            let paths = string_list_argument(&arguments, "paths", &["path", "files", "file"])?;
+            let paths = required_string_array(&arguments, "paths")?;
             api::message::tool_call::Tool::ReadFiles(api::message::tool_call::ReadFiles {
                 files: paths
                     .into_iter()
@@ -299,26 +371,18 @@ fn tool_call_events(
         }
         "file_glob" => {
             api::message::tool_call::Tool::FileGlobV2(api::message::tool_call::FileGlobV2 {
-                patterns: string_list_argument(
-                    &arguments,
-                    "patterns",
-                    &["pattern", "globs", "glob"],
-                )?,
-                search_dir: optional_string_any(&arguments, &["path", "search_dir", "directory"]),
+                patterns: vec![required_string(&arguments, "pattern")?],
+                search_dir: optional_string(&arguments, "path"),
                 ..Default::default()
             })
         }
         "grep" => api::message::tool_call::Tool::Grep(api::message::tool_call::Grep {
-            queries: string_list_argument(
-                &arguments,
-                "queries",
-                &["query", "patterns", "pattern"],
-            )?,
-            path: optional_string_any(&arguments, &["path", "search_dir", "directory"]),
+            queries: vec![required_string(&arguments, "query")?],
+            path: optional_string(&arguments, "path"),
         }),
         "run_shell_command" => api::message::tool_call::Tool::RunShellCommand(
             api::message::tool_call::RunShellCommand {
-                command: required_string_any(&arguments, &["command", "cmd"])?,
+                command: required_string(&arguments, "command")?,
                 ..Default::default()
             },
         ),
@@ -333,40 +397,46 @@ fn tool_call_events(
     ))
 }
 
-fn string_list_argument(
-    value: &serde_json::Value,
-    canonical_key: &str,
-    aliases: &[&str],
-) -> anyhow::Result<Vec<String>> {
-    let argument = std::iter::once(canonical_key)
-        .chain(aliases.iter().copied())
-        .find_map(|key| value.get(key))
-        .ok_or_else(|| anyhow::anyhow!("Missing tool argument `{canonical_key}`."))?;
-    if let Some(single) = argument.as_str() {
-        return Ok(vec![single.to_owned()]);
+fn parse_tool_arguments(arguments: &str) -> anyhow::Result<serde_json::Value> {
+    let parsed: serde_json::Value = serde_json::from_str(arguments)
+        .map_err(|_| anyhow::anyhow!("The local model returned malformed tool arguments."))?;
+    let parsed = match parsed {
+        serde_json::Value::String(encoded) => serde_json::from_str(&encoded)
+            .map_err(|_| anyhow::anyhow!("The local model returned malformed tool arguments."))?,
+        parsed => parsed,
+    };
+    if !parsed.is_object() {
+        anyhow::bail!("The local model returned malformed tool arguments.");
     }
-    argument
-        .as_array()
-        .ok_or_else(|| anyhow::anyhow!("Invalid tool argument `{canonical_key}`."))?
+    Ok(parsed)
+}
+
+fn required_string_array(value: &serde_json::Value, key: &str) -> anyhow::Result<Vec<String>> {
+    value
+        .get(key)
+        .and_then(serde_json::Value::as_array)
+        .ok_or_else(|| anyhow::anyhow!("Missing or invalid tool argument `{key}`."))?
         .iter()
         .map(|item| {
             item.as_str()
                 .map(str::to_owned)
-                .ok_or_else(|| anyhow::anyhow!("Invalid tool argument `{canonical_key}`."))
+                .ok_or_else(|| anyhow::anyhow!("Invalid tool argument `{key}`."))
         })
         .collect()
 }
 
-fn required_string_any(value: &serde_json::Value, keys: &[&str]) -> anyhow::Result<String> {
-    keys.iter()
-        .find_map(|key| value.get(key).and_then(serde_json::Value::as_str))
+fn required_string(value: &serde_json::Value, key: &str) -> anyhow::Result<String> {
+    value
+        .get(key)
+        .and_then(serde_json::Value::as_str)
         .map(str::to_owned)
-        .ok_or_else(|| anyhow::anyhow!("Missing tool argument `{}`.", keys[0]))
+        .ok_or_else(|| anyhow::anyhow!("Missing or invalid tool argument `{key}`."))
 }
 
-fn optional_string_any(value: &serde_json::Value, keys: &[&str]) -> String {
-    keys.iter()
-        .find_map(|key| value.get(key).and_then(serde_json::Value::as_str))
+fn optional_string(value: &serde_json::Value, key: &str) -> String {
+    value
+        .get(key)
+        .and_then(serde_json::Value::as_str)
         .unwrap_or_default()
         .to_owned()
 }
@@ -379,11 +449,17 @@ fn tool_call_to_openai(call: &api::message::ToolCall) -> Option<(&'static str, S
         ),
         api::message::tool_call::Tool::FileGlobV2(tool) => (
             "file_glob",
-            serde_json::json!({ "patterns": tool.patterns, "path": tool.search_dir }),
+            serde_json::json!({
+                "pattern": tool.patterns.first().cloned().unwrap_or_default(),
+                "path": tool.search_dir
+            }),
         ),
         api::message::tool_call::Tool::Grep(tool) => (
             "grep",
-            serde_json::json!({ "queries": tool.queries, "path": tool.path }),
+            serde_json::json!({
+                "query": tool.queries.first().cloned().unwrap_or_default(),
+                "path": tool.path
+            }),
         ),
         api::message::tool_call::Tool::RunShellCommand(tool) => (
             "run_shell_command",
@@ -416,13 +492,20 @@ fn message_events(
         .clone()
         .or_else(|| params.tasks.first().map(|task| task.id.clone()))
         .unwrap_or_else(|| Uuid::new_v4().to_string());
-    let message = api::Message {
-        id: Uuid::new_v4().to_string(),
-        task_id: task_id.clone(),
-        request_id: request_id.clone(),
-        message: Some(message_type),
-        ..Default::default()
-    };
+    let message_types = params
+        .input
+        .iter()
+        .filter_map(persisted_input_message)
+        .chain(std::iter::once(message_type));
+    let messages = message_types
+        .map(|message_type| api::Message {
+            id: Uuid::new_v4().to_string(),
+            task_id: task_id.clone(),
+            request_id: request_id.clone(),
+            message: Some(message_type),
+            ..Default::default()
+        })
+        .collect();
     let mut actions = Vec::new();
     if params.tasks.is_empty() {
         actions.push(api::ClientAction {
@@ -442,10 +525,7 @@ fn message_events(
     }
     actions.push(api::ClientAction {
         action: Some(api::client_action::Action::AddMessagesToTask(
-            api::client_action::AddMessagesToTask {
-                task_id,
-                messages: vec![message],
-            },
+            api::client_action::AddMessagesToTask { task_id, messages },
         )),
     });
     vec![
@@ -476,6 +556,51 @@ fn message_events(
     ]
 }
 
+#[allow(deprecated)]
+fn persisted_input_message(input: &AIAgentInput) -> Option<api::message::Message> {
+    use api::message::tool_call_result::Result as MessageResult;
+    use api::request::input::tool_call_result::Result as RequestResult;
+    use api::request::input::user_inputs::user_input::Input as RequestInput;
+
+    let AIAgentInput::ActionResult { result, .. } = input else {
+        return match input {
+            AIAgentInput::UserQuery { query, .. } => {
+                Some(api::message::Message::UserQuery(api::message::UserQuery {
+                    query: query.clone(),
+                    ..Default::default()
+                }))
+            }
+            _ => None,
+        };
+    };
+    let RequestInput::ToolCallResult(result) = result.clone().try_into().ok()? else {
+        return None;
+    };
+    let result = match result.result? {
+        RequestResult::RunShellCommand(result) => MessageResult::RunShellCommand(result),
+        RequestResult::ReadFiles(result) => MessageResult::ReadFiles(result),
+        RequestResult::Grep(result) => MessageResult::Grep(result),
+        RequestResult::FileGlob(result) => MessageResult::FileGlob(result),
+        RequestResult::FileGlobV2(result) => MessageResult::FileGlobV2(result),
+        _ => return None,
+    };
+
+    Some(api::message::Message::ToolCallResult(
+        api::message::ToolCallResult {
+            tool_call_id: result_id(input)?.to_string(),
+            context: None,
+            result: Some(result),
+        },
+    ))
+}
+
+fn result_id(input: &AIAgentInput) -> Option<&crate::ai::agent::AIAgentActionId> {
+    match input {
+        AIAgentInput::ActionResult { result, .. } => Some(&result.id),
+        _ => None,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -504,28 +629,117 @@ mod tests {
     }
 
     #[test]
-    fn tool_arguments_accept_standard_singular_and_plural_forms() {
+    fn response_events_persist_action_results_before_the_next_agent_message() {
+        let mut params = RequestParams::new_for_test();
+        params.local_task_id = Some("root-task".to_string());
+        params.input.push(AIAgentInput::ActionResult {
+            result: crate::ai::agent::AIAgentActionResult {
+                id: "tool-call-1".to_string().into(),
+                task_id: TaskId::new("root-task".to_string()),
+                result: crate::ai::agent::AIAgentActionResultType::FileGlobV2(
+                    crate::ai::agent::FileGlobV2Result::Success {
+                        matched_files: vec![crate::ai::agent::FileGlobV2Match {
+                            file_path: "/tmp/example.rs".to_string(),
+                        }],
+                        warnings: None,
+                    },
+                ),
+            },
+            context: Arc::from([]),
+        });
+
+        let events = response_events(&params, "done".to_string());
+        let actions = match events[1].r#type.as_ref() {
+            Some(api::response_event::Type::ClientActions(actions)) => actions,
+            event => panic!("expected client actions, got {event:?}"),
+        };
+        let add = match actions.actions[1].action.as_ref() {
+            Some(api::client_action::Action::AddMessagesToTask(add)) => add,
+            action => panic!("expected AddMessagesToTask, got {action:?}"),
+        };
+
+        assert!(matches!(
+            add.messages[0].message,
+            Some(api::message::Message::ToolCallResult(_))
+        ));
+        assert!(matches!(
+            add.messages[1].message,
+            Some(api::message::Message::AgentOutput(_))
+        ));
+    }
+
+    #[test]
+    fn response_events_persist_user_queries_before_the_agent_message() {
+        let mut params = RequestParams::new_for_test();
+        params.local_task_id = Some("root-task".to_string());
+        params.input.push(AIAgentInput::UserQuery {
+            query: "use the detected changes".to_string(),
+            context: Arc::from([]),
+            static_query_type: None,
+            referenced_attachments: HashMap::new(),
+            user_query_mode: Default::default(),
+            running_command: None,
+            intended_agent: None,
+        });
+
+        let events = response_events(&params, "creating the commit".to_string());
+        let actions = match events[1].r#type.as_ref() {
+            Some(api::response_event::Type::ClientActions(actions)) => actions,
+            event => panic!("expected client actions, got {event:?}"),
+        };
+        let add = match actions.actions[1].action.as_ref() {
+            Some(api::client_action::Action::AddMessagesToTask(add)) => add,
+            action => panic!("expected AddMessagesToTask, got {action:?}"),
+        };
+
+        assert!(matches!(
+            add.messages[0].message,
+            Some(api::message::Message::UserQuery(ref query))
+                if query.query == "use the detected changes"
+        ));
+        assert!(matches!(
+            add.messages[1].message,
+            Some(api::message::Message::AgentOutput(_))
+        ));
+    }
+
+    #[test]
+    fn tool_arguments_follow_the_advertised_canonical_schema() {
         assert_eq!(
-            string_list_argument(
-                &serde_json::json!({ "pattern": "*.rs" }),
-                "patterns",
-                &["pattern"]
-            )
-            .unwrap(),
-            vec!["*.rs"]
+            required_string(&serde_json::json!({ "pattern": "*.rs" }), "pattern").unwrap(),
+            "*.rs"
         );
         assert_eq!(
-            string_list_argument(
-                &serde_json::json!({ "patterns": ["*.rs", "*.toml"] }),
-                "patterns",
-                &["pattern"]
-            )
-            .unwrap(),
-            vec!["*.rs", "*.toml"]
+            required_string_array(&serde_json::json!({ "paths": ["a.rs", "b.toml"] }), "paths")
+                .unwrap(),
+            vec!["a.rs", "b.toml"]
         );
-        assert_eq!(
-            required_string_any(&serde_json::json!({ "cmd": "pwd" }), &["command", "cmd"]).unwrap(),
-            "pwd"
-        );
+        assert!(required_string(&serde_json::json!({}), "pattern").is_err());
+        assert!(required_string(&serde_json::json!({ "cmd": "pwd" }), "command").is_err());
+    }
+
+    #[test]
+    fn tool_arguments_accept_openai_json_and_double_encoded_json() {
+        let direct = parse_tool_arguments(r#"{"pattern":"*"}"#).unwrap();
+        let encoded = parse_tool_arguments(r#""{\"pattern\":\"*\"}""#).unwrap();
+
+        assert_eq!(direct, serde_json::json!({ "pattern": "*" }));
+        assert_eq!(encoded, direct);
+    }
+
+    #[test]
+    fn tool_descriptions_distinguish_recursive_search_from_directory_listing() {
+        let tools = tool_definitions();
+        let description = |name: &str| {
+            tools
+                .iter()
+                .find(|tool| tool["function"]["name"] == name)
+                .and_then(|tool| tool["function"]["description"].as_str())
+                .unwrap()
+        };
+
+        assert!(description("file_glob").contains("Recursively search"));
+        assert!(description("file_glob").contains("Do not use it to list"));
+        assert!(description("run_shell_command").contains("listing the immediate entries"));
     }
 }
