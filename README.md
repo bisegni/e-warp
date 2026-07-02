@@ -1,3 +1,17 @@
+
+## Modifications in This Fork
+
+This fork introduces significant changes and enhancements compared to the mainstream branch:
+
+- **Offline & Local Mode:** Added support for running AI agent inference locally/offline, allowing the application to function without any internet connection or external API dependency. See `app/src/ai/agent/api/impl/local_runtime.rs` and the new `offline.rs` binary.
+- **Custom Inference Endpoint:** UI and internal logic have been extended to allow for configuration and use of custom, user-provided AI inference endpoints via the settings modal.
+- **Expanded API & Tests:** API handling (including for API keys) and tests have been expanded to cover new local/offline modes and ensure robust offline operation.
+- **Miscellaneous Enhancements:** Various modules have minor changes to support local inference, custom auth flows, and configuration extensions.
+
+These changes aim to provide a fully-functional, privacy-focused AI agent experience when disconnected from the internet, along with easier customization for enterprise or power users.
+
+---
+
 <a href="https://www.warp.dev">
     <img width="1024" alt="Warp Agentic Development Environment product preview" src="https://github.com/user-attachments/assets/9976b2da-2edd-4604-a36c-8fd53719c6d4" />
 </a>
