@@ -3,15 +3,15 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use futures::channel::oneshot;
-use futures_util::{stream, FutureExt, StreamExt};
+use futures_util::{FutureExt, StreamExt, stream};
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 use warp_multi_agent_api as api;
 
 use super::super::{RequestParams, ResponseStream};
+use crate::ai::agent::AIAgentInput;
 use crate::ai::agent::api::convert_conversation::convert_tool_call_result_to_input;
 use crate::ai::agent::task::TaskId;
-use crate::ai::agent::AIAgentInput;
 use crate::ai::document::ai_document_model::{AIDocumentId, AIDocumentVersion};
 use crate::server::server_api::AIApiError;
 
@@ -163,11 +163,8 @@ async fn run(
             endpoint.name
         )
     })?;
-    if choice.message.tool_calls.len() > 1 {
-        anyhow::bail!("Local Agent Mode supports one tool call at a time.");
-    }
-    if let Some(tool_call) = choice.message.tool_calls.into_iter().next() {
-        return Ok(tool_call_events(&params, tool_call)?);
+    if !choice.message.tool_calls.is_empty() {
+        return tool_call_events(&params, choice.message.tool_calls);
     }
     let text = choice
         .message
@@ -353,8 +350,16 @@ fn tool_definition(
 
 fn tool_call_events(
     params: &RequestParams,
-    call: OpenAIToolCall,
+    calls: Vec<OpenAIToolCall>,
 ) -> anyhow::Result<Vec<api::ResponseEvent>> {
+    let messages = calls
+        .into_iter()
+        .map(tool_call_message)
+        .collect::<anyhow::Result<Vec<_>>>()?;
+    Ok(message_events(params, messages))
+}
+
+fn tool_call_message(call: OpenAIToolCall) -> anyhow::Result<api::message::Message> {
     let arguments = parse_tool_arguments(&call.function.arguments)?;
     let tool = match call.function.name.as_str() {
         "read_files" => {
@@ -388,13 +393,10 @@ fn tool_call_events(
         ),
         _ => anyhow::bail!("The local model requested an unsupported tool."),
     };
-    Ok(message_events(
-        params,
-        api::message::Message::ToolCall(api::message::ToolCall {
-            tool_call_id: call.id,
-            tool: Some(tool),
-        }),
-    ))
+    Ok(api::message::Message::ToolCall(api::message::ToolCall {
+        tool_call_id: call.id,
+        tool: Some(tool),
+    }))
 }
 
 fn parse_tool_arguments(arguments: &str) -> anyhow::Result<serde_json::Value> {
@@ -473,13 +475,15 @@ fn tool_call_to_openai(call: &api::message::ToolCall) -> Option<(&'static str, S
 fn response_events(params: &RequestParams, text: String) -> Vec<api::ResponseEvent> {
     message_events(
         params,
-        api::message::Message::AgentOutput(api::message::AgentOutput { text }),
+        [api::message::Message::AgentOutput(
+            api::message::AgentOutput { text },
+        )],
     )
 }
 
 fn message_events(
     params: &RequestParams,
-    message_type: api::message::Message,
+    message_types: impl IntoIterator<Item = api::message::Message>,
 ) -> Vec<api::ResponseEvent> {
     let request_id = Uuid::new_v4().to_string();
     let conversation_id = params
@@ -496,7 +500,7 @@ fn message_events(
         .input
         .iter()
         .filter_map(persisted_input_message)
-        .chain(std::iter::once(message_type));
+        .chain(message_types);
     let messages = message_types
         .map(|message_type| api::Message {
             id: Uuid::new_v4().to_string(),
@@ -700,6 +704,47 @@ mod tests {
         assert!(matches!(
             add.messages[1].message,
             Some(api::message::Message::AgentOutput(_))
+        ));
+    }
+
+    #[test]
+    fn tool_call_events_emit_every_tool_call_in_one_batch() {
+        let params = RequestParams::new_for_test();
+        let calls = vec![
+            OpenAIToolCall {
+                id: "tool-call-1".to_string(),
+                function: OpenAIFunctionCall {
+                    name: "run_shell_command".to_string(),
+                    arguments: r#"{"command":"git diff --cached --name-only"}"#.to_string(),
+                },
+            },
+            OpenAIToolCall {
+                id: "tool-call-2".to_string(),
+                function: OpenAIFunctionCall {
+                    name: "run_shell_command".to_string(),
+                    arguments: r#"{"command":"git status --porcelain"}"#.to_string(),
+                },
+            },
+        ];
+
+        let events = tool_call_events(&params, calls).unwrap();
+        let actions = match events[1].r#type.as_ref() {
+            Some(api::response_event::Type::ClientActions(actions)) => actions,
+            event => panic!("expected client actions, got {event:?}"),
+        };
+        let add = match actions.actions[1].action.as_ref() {
+            Some(api::client_action::Action::AddMessagesToTask(add)) => add,
+            action => panic!("expected AddMessagesToTask, got {action:?}"),
+        };
+
+        assert_eq!(add.messages.len(), 2);
+        assert!(matches!(
+            add.messages[0].message,
+            Some(api::message::Message::ToolCall(ref call)) if call.tool_call_id == "tool-call-1"
+        ));
+        assert!(matches!(
+            add.messages[1].message,
+            Some(api::message::Message::ToolCall(ref call)) if call.tool_call_id == "tool-call-2"
         ));
     }
 
