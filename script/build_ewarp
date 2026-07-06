@@ -248,7 +248,7 @@ echo "    $BUILT_BIN"
 if [[ "$BUNDLE_APP" -eq 1 ]]; then
   echo ""
   echo "==> Building macOS app bundle"
-  BUNDLE_ARGS=(bundle --package "$PACKAGE_NAME" --bin "$BIN_NAME" --features "$FEATURES")
+  BUNDLE_ARGS=(bundle --bin "$BIN_NAME" --features "$FEATURES")
   if [[ "$PROFILE_MODE" = "release" ]]; then
     BUNDLE_ARGS+=(--release)
     BUNDLE_OUTPUT_DIR="target/release/bundle/osx/eWarp.app"
@@ -258,8 +258,11 @@ if [[ "$BUNDLE_APP" -eq 1 ]]; then
     BUNDLE_ARGS+=(--profile "$PROFILE_MODE")
     BUNDLE_OUTPUT_DIR="target/$PROFILE_MODE/bundle/osx/eWarp.app"
   fi
-  TERM=xterm-256color PROTOC="$PROTOC_BIN" cargo "${BUNDLE_ARGS[@]}"
-  echo "    $BUNDLE_OUTPUT_DIR"
+  (
+    cd "$REPO_ROOT/app"
+    TERM=xterm-256color PROTOC="$PROTOC_BIN" cargo "${BUNDLE_ARGS[@]}"
+  )
+  echo "    app/$BUNDLE_OUTPUT_DIR"
 fi
 
 if [[ "$RUN_AFTER_BUILD" -eq 1 ]]; then
