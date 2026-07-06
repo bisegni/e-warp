@@ -31,7 +31,42 @@ pub struct ChannelState {
     /// The set of additional features to enable (on top of default-enabled ones).
     additional_features: HashSet<FeatureFlag>,
 
+    product_profile: ProductProfile,
     config: ChannelConfig,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct ProductProfile {
+    pub requires_login: bool,
+    pub allows_cloud_objects: bool,
+    pub allows_cloud_agents: bool,
+    pub allows_server_ai: bool,
+    pub allows_local_custom_inference: bool,
+    pub allows_autoupdate: bool,
+}
+
+impl ProductProfile {
+    pub const fn cloud_connected() -> Self {
+        Self {
+            requires_login: true,
+            allows_cloud_objects: true,
+            allows_cloud_agents: true,
+            allows_server_ai: true,
+            allows_local_custom_inference: false,
+            allows_autoupdate: true,
+        }
+    }
+
+    pub const fn standalone() -> Self {
+        Self {
+            requires_login: false,
+            allows_cloud_objects: false,
+            allows_cloud_agents: false,
+            allows_server_ai: false,
+            allows_local_custom_inference: true,
+            allows_autoupdate: false,
+        }
+    }
 }
 
 impl ChannelState {
@@ -41,6 +76,7 @@ impl ChannelState {
         Self {
             channel,
             additional_features: Default::default(),
+            product_profile: ProductProfile::cloud_connected(),
             config: ChannelConfig {
                 app_id,
                 logfile_name: "".into(),
@@ -68,12 +104,18 @@ impl ChannelState {
         Self {
             channel,
             additional_features: Default::default(),
+            product_profile: ProductProfile::cloud_connected(),
             config,
         }
     }
 
     pub fn with_additional_features(mut self, overrides: &[FeatureFlag]) -> Self {
         self.additional_features.extend(overrides);
+        self
+    }
+
+    pub fn with_product_profile(mut self, product_profile: ProductProfile) -> Self {
+        self.product_profile = product_profile;
         self
     }
 
@@ -168,6 +210,14 @@ impl ChannelState {
             .iter()
             .cloned()
             .collect()
+    }
+
+    pub fn product_profile() -> ProductProfile {
+        CHANNEL_STATE.lock().product_profile
+    }
+
+    pub fn is_standalone() -> bool {
+        Self::product_profile() == ProductProfile::standalone()
     }
 
     pub fn debug_str() -> String {

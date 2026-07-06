@@ -1,4 +1,5 @@
 use settings::Setting;
+use warp_core::channel::ChannelState;
 use warp_core::report_if_error;
 use warp_core::ui::Icon;
 use warpui::elements::{
@@ -201,21 +202,6 @@ impl View for TerminalViewZeroStateBlock {
             render_standard_message(
                 Message::new(vec![MessageItem::clickable(
                     vec![
-                        MessageItem::keystroke(
-                            ENTER_CLOUD_AGENT_VIEW_NEW_CONVERSATION_KEYSTROKE.clone(),
-                        ),
-                        MessageItem::text("start a new cloud agent conversation"),
-                    ],
-                    |ctx| {
-                        ctx.dispatch_typed_action(TerminalAction::EnterCloudAgentView);
-                    },
-                    self.state_handles.start_cloud_conversation.clone(),
-                )]),
-                app,
-            ),
-            render_standard_message(
-                Message::new(vec![MessageItem::clickable(
-                    vec![
                         MessageItem::keystroke(Keystroke {
                             key: "up".to_owned(),
                             ..Default::default()
@@ -230,6 +216,27 @@ impl View for TerminalViewZeroStateBlock {
                 app,
             ),
         ];
+
+        if ChannelState::product_profile().allows_cloud_agents {
+            items.insert(
+                1,
+                render_standard_message(
+                    Message::new(vec![MessageItem::clickable(
+                        vec![
+                            MessageItem::keystroke(
+                                ENTER_CLOUD_AGENT_VIEW_NEW_CONVERSATION_KEYSTROKE.clone(),
+                            ),
+                            MessageItem::text("start a new cloud agent conversation"),
+                        ],
+                        |ctx| {
+                            ctx.dispatch_typed_action(TerminalAction::EnterCloudAgentView);
+                        },
+                        self.state_handles.start_cloud_conversation.clone(),
+                    )]),
+                    app,
+                ),
+            );
+        }
 
         if *TabSettings::as_ref(app).show_code_review_button {
             if let Some(keystroke) =

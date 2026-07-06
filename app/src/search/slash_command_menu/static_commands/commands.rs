@@ -3,6 +3,7 @@ use std::sync::LazyLock;
 
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
+use warp_core::channel::ChannelState;
 use warp_core::features::FeatureFlag;
 
 use super::Availability;
@@ -666,7 +667,9 @@ fn all_commands() -> Vec<StaticCommand> {
 
     commands.push(OPEN_CODE_REVIEW);
 
-    if FeatureFlag::CreateEnvironmentSlashCommand.is_enabled() {
+    if ChannelState::product_profile().allows_cloud_agents
+        && FeatureFlag::CreateEnvironmentSlashCommand.is_enabled()
+    {
         commands.push(CREATE_ENVIRONMENT.clone());
     }
 
@@ -710,11 +713,15 @@ fn all_commands() -> Vec<StaticCommand> {
         commands.push(PR_COMMENTS);
     }
 
-    if FeatureFlag::CloudMode.is_enabled() && FeatureFlag::CloudModeFromLocalSession.is_enabled() {
+    if ChannelState::product_profile().allows_cloud_agents
+        && FeatureFlag::CloudMode.is_enabled()
+        && FeatureFlag::CloudModeFromLocalSession.is_enabled()
+    {
         commands.push(CLOUD_AGENT.clone());
     }
 
-    if FeatureFlag::OzHandoff.is_enabled()
+    if ChannelState::product_profile().allows_cloud_agents
+        && FeatureFlag::OzHandoff.is_enabled()
         && FeatureFlag::HandoffLocalCloud.is_enabled()
         && cfg!(all(feature = "local_fs", not(target_family = "wasm")))
     {

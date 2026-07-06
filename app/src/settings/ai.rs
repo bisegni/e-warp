@@ -20,6 +20,7 @@ use settings::{
 };
 use strum::IntoEnumIterator;
 use strum_macros::EnumIter;
+use warp_core::channel::ChannelState;
 use warp_core::execution_mode::AppExecutionMode;
 use warp_core::features::FeatureFlag;
 use warpui::platform::keyboard::KeyCode;
@@ -1802,6 +1803,9 @@ impl AISettings {
     /// False when the user/org has disabled it, cloud conversations are off,
     /// or AI is globally off.
     pub fn is_cloud_handoff_enabled(&self, app: &warpui::AppContext) -> bool {
+        if !ChannelState::product_profile().allows_cloud_agents {
+            return false;
+        }
         if !self.is_any_ai_enabled(app) || *self.should_force_disable_cloud_handoff {
             return false;
         }

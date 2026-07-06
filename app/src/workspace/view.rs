@@ -9406,7 +9406,9 @@ impl Workspace {
 
     fn user_menu_items(&self, app: &AppContext) -> Vec<MenuItem<WorkspaceAction>> {
         let mut items = Vec::new();
-        if !self.auth_state.is_anonymous_or_logged_out() {
+        if ChannelState::product_profile().requires_login
+            && !self.auth_state.is_anonymous_or_logged_out()
+        {
             let name = self.auth_state.username_for_display().unwrap_or_default();
             items.push(MenuItemFields::new(name).with_disabled(true).into_item())
         }
@@ -9489,8 +9491,13 @@ impl Workspace {
             MenuItemFields::new("Slack")
                 .with_on_select_action(WorkspaceAction::JoinSlack)
                 .into_item(),
-            MenuItem::Separator,
         ]);
+
+        if ChannelState::product_profile().requires_login {
+            items.push(MenuItem::Separator);
+        } else {
+            return items;
+        }
 
         if self.auth_state.is_anonymous_or_logged_out() {
             items.push(
@@ -21042,13 +21049,17 @@ impl Workspace {
     }
 
     fn render_avatar_button(&self, appearance: &Appearance, ctx: &AppContext) -> Box<dyn Element> {
+        let standalone =
+            cfg!(feature = "offline") || !ChannelState::product_profile().requires_login;
         let is_anonymous = self.auth_state.is_anonymous_or_logged_out();
         let display_name = self
             .auth_state
             .username_for_display()
             .unwrap_or(DEFAULT_USER_DISPLAY_NAME.to_owned());
 
-        let avatar_content = if self.auth_state.is_anonymous_or_logged_out() {
+        let avatar_content = if standalone {
+            AvatarContent::Icon(icons::Icon::Menu01)
+        } else if self.auth_state.is_anonymous_or_logged_out() {
             AvatarContent::Icon(icons::Icon::Gear)
         } else {
             self.auth_state
@@ -21065,12 +21076,28 @@ impl Workspace {
             UiComponentStyles {
                 width: Some(20.),
                 height: Some(20.),
-                border_radius: Some(CornerRadius::with_all(Radius::Percentage(50.))),
+                border_radius: Some(if standalone {
+                    CornerRadius::with_all(Radius::Pixels(6.))
+                } else {
+                    CornerRadius::with_all(Radius::Percentage(50.))
+                }),
                 font_family_id: Some(appearance.ui_font_family()),
                 font_weight: Some(Weight::Bold),
-                background: Some(appearance.theme().accent().into()),
+                background: Some(
+                    if standalone {
+                        appearance.theme().surface_3().into()
+                    } else {
+                        appearance.theme().accent().into()
+                    },
+                ),
                 font_size: Some(12.),
-                font_color: Some(ColorU::black()),
+                font_color: Some(
+                    if standalone {
+                        appearance.theme().foreground().into()
+                    } else {
+                        ColorU::black()
+                    },
+                ),
                 ..Default::default()
             },
         );
@@ -21102,8 +21129,27 @@ impl Workspace {
                 if !state.is_clicked() {
                     container = container.with_background(appearance.theme().surface_2());
                 }
-                // On hover, show tooltip of user's display name (if it exists)
-                if !self.is_user_menu_open && !is_anonymous {
+                // In standalone mode this is an app actions/info menu, not a user identity affordance.
+                if !self.is_user_menu_open && standalone {
+                    stack.add_positioned_overlay_child(
+                        appearance
+                            .ui_builder()
+                            .tool_tip("App menu".to_string())
+                            .with_style(UiComponentStyles {
+                                background: Some(appearance.theme().tooltip_background().into()),
+                                font_color: Some(appearance.theme().background().into_solid()),
+                                ..Default::default()
+                            })
+                            .build()
+                            .finish(),
+                        OffsetPositioning::offset_from_parent(
+                            vec2f(0., 4.),
+                            ParentOffsetBounds::WindowByPosition,
+                            ParentAnchor::BottomMiddle,
+                            ChildAnchor::TopMiddle,
+                        ),
+                    );
+                } else if !self.is_user_menu_open && !is_anonymous {
                     stack.add_positioned_overlay_child(
                         appearance
                             .ui_builder()

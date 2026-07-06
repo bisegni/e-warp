@@ -54,7 +54,11 @@ where
         ..Default::default()
     };
 
-    let text = "You are currently offline. An internet connection is required to use Warp for the first time.";
+    let text = if ChannelState::product_profile().requires_login {
+        "You are currently offline. An internet connection is required to use Warp for the first time."
+    } else {
+        "You are using Warp Standalone. Local terminal and local AI features work without signing in or connecting to Warp's servers."
+    };
 
     let (button_color, button_variant) = action_button_color_and_variant(appearance);
     let button_styles = UiComponentStyles {
@@ -168,9 +172,22 @@ where
         ..Default::default()
     };
 
-    let paragraph_1 = "All of Warp’s non-cloud features work offline.";
-    let paragraph_2 = "However, we require users to be online when using Warp for the first time in order to enable Warp's AI and cloud features.";
-    let paragraph_3 = "We offer cloud features to all users, and so we need an internet connection to meter AI usage, prevent abuse, and associate cloud objects with users. If you opt to use Warp logged-out, a unique ID will be attached to an anonymous user account in order to support these features.";
+    let standalone = !ChannelState::product_profile().requires_login;
+    let paragraph_1 = if standalone {
+        "Warp Standalone is a local-first build of Warp."
+    } else {
+        "All of Warp’s non-cloud features work offline."
+    };
+    let paragraph_2 = if standalone {
+        "You can use the terminal, editor, local agent flows, and user-configured local AI endpoints without signing in."
+    } else {
+        "However, we require users to be online when using Warp for the first time in order to enable Warp's AI and cloud features."
+    };
+    let paragraph_3 = if standalone {
+        "Cloud features such as Warp Drive, cloud agents, server-backed sharing, and Warp-managed AI routing are intentionally disabled in this build."
+    } else {
+        "We offer cloud features to all users, and so we need an internet connection to meter AI usage, prevent abuse, and associate cloud objects with users. If you opt to use Warp logged-out, a unique ID will be attached to an anonymous user account in order to support these features."
+    };
 
     Container::new(
         Flex::column()
@@ -184,7 +201,11 @@ where
                 Container::new(
                     appearance
                         .ui_builder()
-                        .span("Using Warp Offline")
+                        .span(if standalone {
+                            "Using Warp Standalone"
+                        } else {
+                            "Using Warp Offline"
+                        })
                         .with_style(header_styles)
                         .build()
                         .finish(),

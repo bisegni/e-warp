@@ -9,6 +9,7 @@ use parking_lot::FairMutex;
 use settings::Setting;
 use warp_core::features::FeatureFlag;
 use warp_core::report_if_error;
+use warp_core::channel::ChannelState;
 use warp_core::ui::Icon;
 use warpui::elements::{
     Clipped, Container, CornerRadius, CrossAxisAlignment, Flex, FormattedTextElement,
@@ -408,8 +409,13 @@ impl View for AgentViewZeroStateBlock {
                 icon: Icon::OzCloud,
             }
         } else {
-            let mut local_description =
-                "Send a prompt below to start a new conversation".to_owned();
+            let standalone =
+                cfg!(feature = "offline") || !ChannelState::product_profile().requires_login;
+            let mut local_description = if standalone {
+                "Send a prompt below to start a new local conversation".to_owned()
+            } else {
+                "Send a prompt below to start a new conversation".to_owned()
+            };
             let active_session = self.active_session(app);
             let location_label = active_session.as_deref().and_then(|session| {
                 format_session_location(session, self.current_working_directory.as_deref())
@@ -419,9 +425,13 @@ impl View for AgentViewZeroStateBlock {
             }
 
             HeaderProps {
-                title: "New Oz agent conversation".into(),
+                title: if standalone {
+                    "New local agent conversation".into()
+                } else {
+                    "New Oz agent conversation".into()
+                },
                 description: AgentViewDescription::PlainText(vec![local_description.into()]),
-                icon: Icon::Oz,
+                icon: if standalone { Icon::Terminal } else { Icon::Oz },
             }
         };
 
@@ -429,7 +439,10 @@ impl View for AgentViewZeroStateBlock {
             .with_main_axis_size(MainAxisSize::Min)
             .with_children(render_title_and_description(header_props, app));
 
-        if !self.origin.is_cloud_agent() {
+        if !self.origin.is_cloud_agent()
+            && !cfg!(feature = "offline")
+            && ChannelState::product_profile().requires_login
+        {
             if let Some(oz_updates_section) = render_oz_updates(
                 OzUpdatesProps {
                     is_expanded: self.is_oz_updates_expanded,
@@ -748,21 +761,6 @@ fn render_body(props: ZeroStateBodyProps<'_>, app: &AppContext) -> Vec<Box<dyn E
             render_standard_message(
                 Message::new(vec![MessageItem::clickable(
                     vec![
-                        MessageItem::keystroke(
-                            ENTER_CLOUD_AGENT_VIEW_NEW_CONVERSATION_KEYSTROKE.clone(),
-                        ),
-                        MessageItem::text("start a new cloud agent conversation"),
-                    ],
-                    |ctx| {
-                        ctx.dispatch_typed_action(TerminalAction::EnterCloudAgentView);
-                    },
-                    state_handles.start_cloud_conversation.clone(),
-                )]),
-                app,
-            ),
-            render_standard_message(
-                Message::new(vec![MessageItem::clickable(
-                    vec![
                         MessageItem::keystroke(Keystroke {
                             key: "/model".to_owned(),
                             ..Default::default()
@@ -777,6 +775,27 @@ fn render_body(props: ZeroStateBodyProps<'_>, app: &AppContext) -> Vec<Box<dyn E
                 app,
             ),
         ];
+
+        if ChannelState::product_profile().allows_cloud_agents {
+            body_items.insert(
+                1,
+                render_standard_message(
+                    Message::new(vec![MessageItem::clickable(
+                        vec![
+                            MessageItem::keystroke(
+                                ENTER_CLOUD_AGENT_VIEW_NEW_CONVERSATION_KEYSTROKE.clone(),
+                            ),
+                            MessageItem::text("start a new cloud agent conversation"),
+                        ],
+                        |ctx| {
+                            ctx.dispatch_typed_action(TerminalAction::EnterCloudAgentView);
+                        },
+                        state_handles.start_cloud_conversation.clone(),
+                    )]),
+                    app,
+                ),
+            );
+        }
 
         // Only show "escape to go back" if there's a parent terminal
         if has_parent_terminal {

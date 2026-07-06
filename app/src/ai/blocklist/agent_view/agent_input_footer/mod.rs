@@ -23,6 +23,7 @@ use toolbar_item::AgentToolbarItemKind;
 #[cfg(feature = "voice_input")]
 use voice_input::{StartListeningError, VoiceSessionResult};
 use warp_cli::agent::Harness;
+use warp_core::channel::ChannelState;
 use warp_core::context_flag::ContextFlag;
 use warp_core::report_if_error;
 use warp_core::ui::color::blend::Blend;
@@ -1443,7 +1444,8 @@ impl AgentInputFooter {
         // viewing a cloud agent's shared session.
         if matches!(item, AgentToolbarItemKind::ShareSession)
             && (is_conversation_transcript_context
-                || self.terminal_model.lock().is_shared_ambient_agent_session())
+                || self.terminal_model.lock().is_shared_ambient_agent_session()
+                || !ChannelState::product_profile().allows_cloud_agents)
         {
             return None;
         }
@@ -2004,6 +2006,14 @@ impl AgentInputFooter {
     /// user is anonymous or logged out, since session sharing requires a
     /// real account.
     fn sync_remote_control_button(&self, ctx: &mut ViewContext<Self>) {
+        if !ChannelState::product_profile().allows_cloud_agents {
+            self.start_remote_control_button.update(ctx, |button, ctx| {
+                button.set_disabled(true, ctx);
+                button.set_tooltip(Some("Remote control is unavailable in standalone mode"), ctx);
+            });
+            return;
+        }
+
         let login_required = AuthStateProvider::as_ref(ctx)
             .get()
             .is_anonymous_or_logged_out();

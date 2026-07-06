@@ -1,5 +1,6 @@
 use settings::macros::define_settings_group;
 use settings::{RespectUserSyncSetting, SupportedPlatforms, SyncToCloud};
+use warp_core::channel::ChannelState;
 use warp_core::features::FeatureFlag;
 
 use super::DriveSortOrder;
@@ -41,6 +42,9 @@ impl WarpDriveSettings {
     /// regardless of the user setting.
     pub fn is_warp_drive_enabled(app: &warpui::AppContext) -> bool {
         use warpui::SingletonEntity as _;
+        if !ChannelState::product_profile().allows_cloud_objects {
+            return false;
+        }
         let is_anonymous_or_logged_out = FeatureFlag::SkipFirebaseAnonymousUser.is_enabled()
             && crate::auth::AuthStateProvider::as_ref(app)
                 .get()

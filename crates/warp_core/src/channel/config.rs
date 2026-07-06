@@ -63,6 +63,16 @@ impl WarpServerConfig {
             iap_config: None,
         }
     }
+
+    pub fn standalone() -> Self {
+        Self {
+            server_root_url: "http://127.0.0.1:9".into(),
+            rtc_server_url: "ws://127.0.0.1:9/graphql/v2".into(),
+            session_sharing_server_url: None,
+            firebase_auth_api_key: "".into(),
+            iap_config: None,
+        }
+    }
 }
 
 #[derive(Debug, Deserialize, Serialize)]
@@ -81,6 +91,13 @@ impl OzConfig {
         Self {
             oz_root_url: "https://oz.warp.dev".into(),
             workload_audience_url: None,
+        }
+    }
+
+    pub fn standalone() -> Self {
+        Self {
+            oz_root_url: "http://127.0.0.1:9".into(),
+            workload_audience_url: Some("http://127.0.0.1:9".into()),
         }
     }
 }

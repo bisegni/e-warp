@@ -8,6 +8,7 @@ use ai::api_keys::{
 pub use ai::LLMId;
 use parking_lot::FairMutex;
 use serde::{de, Deserialize, Serialize};
+use warp_core::channel::ChannelState;
 use warp_core::features::FeatureFlag;
 use warp_core::ui::icons::Icon;
 use warp_core::user_preferences::GetUserPreferences;
@@ -1371,6 +1372,9 @@ impl LLMPreferences {
     }
 
     pub fn refresh_available_models(&self, ctx: &mut ModelContext<Self>) {
+        if !ChannelState::product_profile().allows_server_ai {
+            return;
+        }
         if AuthStateProvider::as_ref(ctx).get().is_logged_in() {
             self.refresh_authed_models(ctx);
         } else {

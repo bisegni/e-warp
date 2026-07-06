@@ -13,6 +13,7 @@ use futures::stream::AbortHandle;
 use itertools::Itertools;
 use lazy_static::lazy_static;
 use regex::Regex;
+use warp_core::channel::ChannelState;
 use warp_core::features::FeatureFlag;
 use warp_core::report_error;
 use warp_graphql::mcp_gallery_template::MCPGalleryTemplate;
@@ -624,6 +625,9 @@ impl UpdateManager {
     }
 
     pub fn start_polling_for_updated_objects(&mut self, ctx: &mut ModelContext<Self>) {
+        if !ChannelState::product_profile().allows_cloud_objects {
+            return;
+        }
         let is_online = NetworkStatus::as_ref(ctx).is_online();
 
         if !self.should_poll_for_updated_objects && is_online {
@@ -634,6 +638,9 @@ impl UpdateManager {
 
     /// Out-of-band (from the regular poll) refresh of updated objects.
     pub fn refresh_updated_objects(&mut self, ctx: &mut ModelContext<Self>) {
+        if !ChannelState::product_profile().allows_cloud_objects {
+            return;
+        }
         let object_client = self.object_client.clone();
         let cloud_model = CloudModel::as_ref(ctx);
         let versions_for_all_objects = cloud_model.get_versions_for_all_objects(ctx);
