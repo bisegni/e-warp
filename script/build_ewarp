@@ -1,0 +1,267 @@
+#!/usr/bin/env bash
+
+set -euo pipefail
+
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+REPO_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
+cd "$REPO_ROOT"
+
+BIN_NAME="ewarp"
+PACKAGE_NAME="warp"
+FEATURES="offline"
+PROFILE_MODE="debug"
+TARGET_TRIPLE=""
+OS_NAME=""
+BUNDLE_APP=0
+RUN_AFTER_BUILD=0
+USE_CROSS_ARCH=0
+PROTOC_BIN="${PROTOC:-}"
+EXTRA_CARGO_ARGS=()
+
+usage() {
+  cat <<'EOF'
+Usage: script/build_ewarp [OPTIONS] [-- <extra cargo args>]
+
+Build the standalone eWarp binary for macOS, Linux, or Windows.
+
+Options:
+  --os <os>              Target OS: osx|linux|windows
+  --target <triple>      Rust target triple, for example:
+                         aarch64-apple-darwin
+                         x86_64-apple-darwin
+                         x86_64-unknown-linux-musl
+                         x86_64-pc-windows-gnu
+  --release              Build with the release profile
+  --profile <profile>    Cargo profile name. Default: debug
+  --bundle               Build a macOS .app bundle for eWarp
+  --run                  Run eWarp after building
+  --cross-arch           Build with --target <triple>
+  --protoc <path>        Explicit protoc path
+  --help                 Show this help
+
+Examples:
+  script/build_ewarp --os osx --release
+  script/build_ewarp --os linux --target x86_64-unknown-linux-musl --cross-arch --release
+  script/build_ewarp --os windows --target x86_64-pc-windows-gnu --cross-arch --release
+  script/build_ewarp --bundle --release
+
+Notes:
+  - Plain cargo defaults in this repo still point at warp-oss, so this script
+    always builds --bin ewarp --features offline.
+  - Cross-architecture builds may need extra toolchains, linkers, or SDKs.
+  - macOS app bundling only works when building on macOS for a macOS target.
+EOF
+}
+
+host_os() {
+  case "$(uname -s)" in
+    Darwin) echo "osx" ;;
+    Linux) echo "linux" ;;
+    MINGW64_NT*|MSYS_NT*|CYGWIN_NT*) echo "windows" ;;
+    *) echo "unknown" ;;
+  esac
+}
+
+default_target_for_os() {
+  case "$1" in
+    osx)
+      case "$(uname -m)" in
+        arm64|aarch64) echo "aarch64-apple-darwin" ;;
+        x86_64) echo "x86_64-apple-darwin" ;;
+        *) echo "aarch64-apple-darwin" ;;
+      esac
+      ;;
+    linux)
+      echo "x86_64-unknown-linux-gnu"
+      ;;
+    windows)
+      echo "x86_64-pc-windows-gnu"
+      ;;
+    *)
+      return 1
+      ;;
+  esac
+}
+
+binary_extension_for_target() {
+  case "$1" in
+    *windows*) echo ".exe" ;;
+    *) echo "" ;;
+  esac
+}
+
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --os)
+      OS_NAME="$2"
+      shift 2
+      ;;
+    --target)
+      TARGET_TRIPLE="$2"
+      shift 2
+      ;;
+    --release)
+      PROFILE_MODE="release"
+      shift
+      ;;
+    --profile)
+      PROFILE_MODE="$2"
+      shift 2
+      ;;
+    --bundle)
+      BUNDLE_APP=1
+      shift
+      ;;
+    --run)
+      RUN_AFTER_BUILD=1
+      shift
+      ;;
+    --cross-arch)
+      USE_CROSS_ARCH=1
+      shift
+      ;;
+    --protoc)
+      PROTOC_BIN="$2"
+      shift 2
+      ;;
+    --help|-h)
+      usage
+      exit 0
+      ;;
+    --)
+      shift
+      EXTRA_CARGO_ARGS=("$@")
+      break
+      ;;
+    *)
+      echo "Error: unknown argument: $1" >&2
+      usage >&2
+      exit 1
+      ;;
+  esac
+done
+
+HOST_OS="$(host_os)"
+
+if [[ -z "$OS_NAME" ]]; then
+  OS_NAME="$HOST_OS"
+fi
+
+if [[ -z "$TARGET_TRIPLE" ]]; then
+  TARGET_TRIPLE="$(default_target_for_os "$OS_NAME")"
+fi
+
+if [[ -z "$PROTOC_BIN" ]]; then
+  if command -v protoc >/dev/null 2>&1; then
+    PROTOC_BIN="$(command -v protoc)"
+  elif [[ -x /opt/homebrew/bin/protoc ]]; then
+    PROTOC_BIN="/opt/homebrew/bin/protoc"
+  fi
+fi
+
+if [[ -z "$PROTOC_BIN" ]]; then
+  echo "Error: protoc not found. Pass --protoc <path> or install protoc." >&2
+  exit 1
+fi
+
+if [[ "$BUNDLE_APP" -eq 1 && "$OS_NAME" != "osx" ]]; then
+  echo "Error: --bundle is only supported for macOS targets." >&2
+  exit 1
+fi
+
+if [[ "$BUNDLE_APP" -eq 1 && "$HOST_OS" != "osx" ]]; then
+  echo "Error: macOS bundling must be run on macOS." >&2
+  exit 1
+fi
+
+if [[ "$BUNDLE_APP" -eq 1 && "$TARGET_TRIPLE" != *apple-darwin* ]]; then
+  echo "Error: macOS bundling requires an apple-darwin target triple." >&2
+  exit 1
+fi
+
+CARGO_ARGS=(build -p "$PACKAGE_NAME" --bin "$BIN_NAME" --features "$FEATURES")
+
+if [[ "$PROFILE_MODE" = "release" ]]; then
+  CARGO_ARGS+=(--release)
+elif [[ "$PROFILE_MODE" != "debug" ]]; then
+  CARGO_ARGS+=(--profile "$PROFILE_MODE")
+fi
+
+if [[ "$USE_CROSS_ARCH" -eq 1 || -n "$TARGET_TRIPLE" ]]; then
+  CARGO_ARGS+=(--target "$TARGET_TRIPLE")
+fi
+
+if [[ ${#EXTRA_CARGO_ARGS[@]} -gt 0 ]]; then
+  CARGO_ARGS+=("${EXTRA_CARGO_ARGS[@]}")
+fi
+
+echo "==> Building eWarp"
+echo "    Host OS: $HOST_OS"
+echo "    Target OS: $OS_NAME"
+echo "    Target triple: $TARGET_TRIPLE"
+echo "    Profile: $PROFILE_MODE"
+echo "    Bundle app: $BUNDLE_APP"
+echo "    Run after build: $RUN_AFTER_BUILD"
+echo ""
+
+if ! rustup target list --installed 2>/dev/null | grep -qx "$TARGET_TRIPLE"; then
+  echo "Warning: rust target '$TARGET_TRIPLE' is not installed." >&2
+  echo "Install it with: rustup target add $TARGET_TRIPLE" >&2
+fi
+
+if [[ "$TARGET_TRIPLE" = "x86_64-unknown-linux-musl" && "$HOST_OS" = "osx" ]]; then
+  if ! command -v x86_64-linux-musl-gcc >/dev/null 2>&1; then
+    echo "Warning: x86_64-linux-musl-gcc not found." >&2
+    echo "Install it with: brew install filosottile/musl-cross/musl-cross" >&2
+  else
+    export CARGO_TARGET_X86_64_UNKNOWN_LINUX_MUSL_LINKER="x86_64-linux-musl-gcc"
+    export CARGO_TARGET_X86_64_UNKNOWN_LINUX_MUSL_RUSTFLAGS="-C symbol-mangling-version=v0"
+  fi
+fi
+
+if [[ "$TARGET_TRIPLE" = *windows-msvc ]]; then
+  echo "Warning: MSVC targets usually require the Windows MSVC toolchain and SDK." >&2
+fi
+
+if [[ "$TARGET_TRIPLE" = *windows-gnu ]]; then
+  echo "Warning: Windows GNU targets require a MinGW-compatible linker." >&2
+fi
+
+PROTOC="$PROTOC_BIN" cargo "${CARGO_ARGS[@]}"
+
+PROFILE_DIR="$PROFILE_MODE"
+if [[ "$PROFILE_MODE" = "debug" ]]; then
+  PROFILE_DIR="debug"
+fi
+
+BIN_EXT="$(binary_extension_for_target "$TARGET_TRIPLE")"
+if [[ "$USE_CROSS_ARCH" -eq 1 || "$TARGET_TRIPLE" != "$(default_target_for_os "$HOST_OS" 2>/dev/null || true)" ]]; then
+  BUILT_BIN="target/$TARGET_TRIPLE/$PROFILE_DIR/$BIN_NAME$BIN_EXT"
+else
+  BUILT_BIN="target/$PROFILE_DIR/$BIN_NAME$BIN_EXT"
+fi
+
+echo ""
+echo "==> Binary output"
+echo "    $BUILT_BIN"
+
+if [[ "$BUNDLE_APP" -eq 1 ]]; then
+  echo ""
+  echo "==> Building macOS app bundle"
+  BUNDLE_ARGS=(bundle -p "$PACKAGE_NAME" --bin "$BIN_NAME" --features "$FEATURES")
+  if [[ "$PROFILE_MODE" = "release" ]]; then
+    BUNDLE_ARGS+=(--release)
+  fi
+  TERM=xterm-256color PROTOC="$PROTOC_BIN" cargo "${BUNDLE_ARGS[@]}"
+  echo "    target/release/bundle/osx/eWarp.app"
+fi
+
+if [[ "$RUN_AFTER_BUILD" -eq 1 ]]; then
+  if [[ ! -x "$BUILT_BIN" ]]; then
+    echo "Error: built binary not found at $BUILT_BIN" >&2
+    exit 1
+  fi
+  echo ""
+  echo "==> Running $BUILT_BIN"
+  exec "$BUILT_BIN"
+fi

@@ -86,13 +86,34 @@ Once filed, a Warp maintainer reviews the issue and may apply a readiness label:
 
 ### Building the Repo Locally
 
-To build and run Warp from source:
+To build the default open-source Warp app from source:
 
 ```bash
 ./script/bootstrap   # platform-specific setup
-./script/run         # build and run Warp
+./script/run         # build and run Warp OSS
 ./script/presubmit   # fmt, clippy, and tests
 ```
+
+To build the standalone `eWarp` app from this fork, do not use plain `cargo run` or plain `cargo bundle`. This workspace still has `warp-oss` as the Cargo default target, so you must explicitly select the renamed standalone binary:
+
+```bash
+./script/bootstrap
+PROTOC=/opt/homebrew/bin/protoc cargo build -p warp --bin ewarp --features offline
+PROTOC=/opt/homebrew/bin/protoc cargo run -p warp --bin ewarp --features offline
+TERM=xterm-256color PROTOC=/opt/homebrew/bin/protoc cargo bundle -p warp --release --bin ewarp --features offline
+```
+
+Expected outputs:
+
+```text
+target/debug/ewarp
+target/release/bundle/osx/eWarp.app
+```
+
+Notes:
+- `cargo run` by itself builds `warp-oss`, because `app/Cargo.toml` still sets `default-run = "warp-oss"`.
+- `cargo bundle` must include both `--bin ewarp` and `--features offline`, otherwise it will package the wrong app.
+- The bundled macOS app name for the standalone fork is `eWarp.app`.
 
 See [AGENTS.md](AGENTS.md) for the full engineering guide, including coding style, testing, and platform-specific notes.
 
