@@ -7,9 +7,9 @@ use itertools::Itertools as _;
 use markdown_parser::{parse_markdown, FormattedText, FormattedTextFragment, FormattedTextLine};
 use parking_lot::FairMutex;
 use settings::Setting;
+use warp_core::channel::ChannelState;
 use warp_core::features::FeatureFlag;
 use warp_core::report_if_error;
-use warp_core::channel::ChannelState;
 use warp_core::ui::Icon;
 use warpui::elements::{
     Clipped, Container, CornerRadius, CrossAxisAlignment, Flex, FormattedTextElement,

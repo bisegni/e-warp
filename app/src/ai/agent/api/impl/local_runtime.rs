@@ -3,15 +3,15 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use futures::channel::oneshot;
-use futures_util::{FutureExt, StreamExt, stream};
+use futures_util::{stream, FutureExt, StreamExt};
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 use warp_multi_agent_api as api;
 
 use super::super::{RequestParams, ResponseStream};
-use crate::ai::agent::AIAgentInput;
 use crate::ai::agent::api::convert_conversation::convert_tool_call_result_to_input;
 use crate::ai::agent::task::TaskId;
+use crate::ai::agent::AIAgentInput;
 use crate::ai::document::ai_document_model::{AIDocumentId, AIDocumentVersion};
 use crate::server::server_api::AIApiError;
 

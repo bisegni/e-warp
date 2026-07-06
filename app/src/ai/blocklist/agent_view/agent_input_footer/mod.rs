@@ -2009,7 +2009,10 @@ impl AgentInputFooter {
         if !ChannelState::product_profile().allows_cloud_agents {
             self.start_remote_control_button.update(ctx, |button, ctx| {
                 button.set_disabled(true, ctx);
-                button.set_tooltip(Some("Remote control is unavailable in standalone mode"), ctx);
+                button.set_tooltip(
+                    Some("Remote control is unavailable in standalone mode"),
+                    ctx,
+                );
             });
             return;
         }

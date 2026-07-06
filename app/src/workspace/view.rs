@@ -9487,11 +9487,9 @@ impl Workspace {
                 .into_item(),
         );
 
-        items.extend([
-            MenuItemFields::new("Slack")
-                .with_on_select_action(WorkspaceAction::JoinSlack)
-                .into_item(),
-        ]);
+        items.extend([MenuItemFields::new("Slack")
+            .with_on_select_action(WorkspaceAction::JoinSlack)
+            .into_item()]);
 
         if ChannelState::product_profile().requires_login {
             items.push(MenuItem::Separator);
@@ -21083,21 +21081,17 @@ impl Workspace {
                 }),
                 font_family_id: Some(appearance.ui_font_family()),
                 font_weight: Some(Weight::Bold),
-                background: Some(
-                    if standalone {
-                        appearance.theme().surface_3().into()
-                    } else {
-                        appearance.theme().accent().into()
-                    },
-                ),
+                background: Some(if standalone {
+                    appearance.theme().surface_3().into()
+                } else {
+                    appearance.theme().accent().into()
+                }),
                 font_size: Some(12.),
-                font_color: Some(
-                    if standalone {
-                        appearance.theme().foreground().into()
-                    } else {
-                        ColorU::black()
-                    },
-                ),
+                font_color: Some(if standalone {
+                    appearance.theme().foreground().into()
+                } else {
+                    ColorU::black()
+                }),
                 ..Default::default()
             },
         );
