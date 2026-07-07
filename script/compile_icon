@@ -22,6 +22,12 @@ REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 
 ICON_BUNDLE_PATH="$REPO_ROOT/app/channels/$CHANNEL/icon/AppIcon.icon"
 
+if [[ ! -d "$ICON_BUNDLE_PATH" && "$CHANNEL" = "ewarp" ]]; then
+    echo "No dedicated ewarp icon bundle found; falling back to oss icon assets."
+    CHANNEL="oss"
+    ICON_BUNDLE_PATH="$REPO_ROOT/app/channels/$CHANNEL/icon/AppIcon.icon"
+fi
+
 # Only compile if the .icon bundle exists for this channel.
 if [[ ! -d "$ICON_BUNDLE_PATH" ]]; then
     if [[ "$CHANNEL" = "oss" ]]; then

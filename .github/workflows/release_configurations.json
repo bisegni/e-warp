@@ -39,6 +39,19 @@
             "changelog_slack_channel": "#release",
             "gcs_cache_control_value": "public, max-age=604800, immutable",
             "web_gcs_bucket_prefix": "warp"
+        },
+        {
+            "channel": "ewarp",
+            "type": "weekly",
+            "is_prerelease": false,
+            "is_autopush": false,
+            "release_base_name": "eWarp Release",
+            "release_body_text": "eWarp standalone release",
+            "sentry_project": "warp-client-dev",
+            "sentry_environment": "ewarp_release",
+            "changelog_slack_channel": "#release",
+            "gcs_cache_control_value": "public, max-age=604800, immutable",
+            "web_gcs_bucket_prefix": "warp"
         }
     ]
 }

@@ -9,7 +9,7 @@ Param (
     [Alias('check-only')]
     [Switch]$CHECK_ONLY,
 
-    [ValidateSet('local', 'dev', 'preview', 'stable', 'oss')]
+    [ValidateSet('local', 'dev', 'preview', 'stable', 'ewarp', 'oss')]
     [String]$CHANNEL = 'dev',
 
     [Alias('release-tag')]
@@ -106,6 +106,11 @@ if ("$CHANNEL" -eq 'local') {
     $WARP_BIN = 'stable'
     $BINARY_NAME = 'warp.exe'
     $APP_NAME = 'Warp'
+} elseif ("$CHANNEL" -eq 'ewarp') {
+    $WARP_BIN = 'ewarp'
+    $BINARY_NAME = 'ewarp.exe'
+    $APP_NAME = 'eWarp'
+    $FEATURES = 'release_bundle,offline'
 } elseif ("$CHANNEL" -eq 'oss') {
     $WARP_BIN = 'warp-oss'
     $BINARY_NAME = 'warp-oss.exe'

@@ -411,7 +411,7 @@ jobs:
     name: Build Release (macOS CLI ${{ matrix.arch }})
     runs-on: macos-26-xlarge
     needs: prepare_release
-    if: ${{ inputs.build_macos != false }}
+    if: ${{ inputs.build_macos != false && inputs.channel != 'ewarp' }}
     timeout-minutes: 60
     strategy:
       fail-fast: false
@@ -673,7 +673,7 @@ jobs:
     name: Build Release (Linux CLI x86_64)
     runs-on: namespace-profile-ubuntu-20-04
     needs: prepare_release
-    if: ${{ inputs.build_linux != false }}
+    if: ${{ inputs.build_linux != false && inputs.channel != 'ewarp' }}
     timeout-minutes: 90
     env:
       # Cache the generated settings schema so prepare_bundled_resources only
@@ -985,7 +985,13 @@ jobs:
         run: rm -rf target/*/bundle/linux
         shell: bash
 
+      - name: Skip CLI build for ewarp
+        if: ${{ inputs.channel == 'ewarp' }}
+        run: echo "Skipping Linux ARM CLI build for ewarp."
+        shell: bash
+
       - name: Build CLI
+        if: ${{ inputs.channel != 'ewarp' }}
         id: build_cli
         run: |
           # Build the CLI only
@@ -996,6 +1002,7 @@ jobs:
           GIT_RELEASE_TAG: ${{ needs.prepare_release.outputs.release_tag }}
 
       - name: Package binaries
+        if: ${{ inputs.channel != 'ewarp' }}
         id: package_binaries
         run: |
           # Tar up all the binaries we need for the next stage
@@ -1010,6 +1017,7 @@ jobs:
           PACKAGES_DIR: ${{steps.build_cli.outputs.packages_dir}}
 
       - name: Archive build files
+        if: ${{ inputs.channel != 'ewarp' }}
         uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6
         with:
           name: built-arm64-linux-cli-${{steps.get-config.outputs.channel}}
@@ -1159,17 +1167,20 @@ jobs:
       # Bundle the CLI packages
 
       - name: Download CLI build artifacts
+        if: ${{ inputs.channel != 'ewarp' }}
         uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
         with:
           name: built-arm64-linux-cli-${{steps.get-config.outputs.channel}}
 
       - name: Unpackage CLI binaries
+        if: ${{ inputs.channel != 'ewarp' }}
         id: unpackage_cli_binaries
         run: |
           tar xzvf binaries-cli.tar.gz
         shell: bash
 
       - name: Bundle deb/rpm CLI packages
+        if: ${{ inputs.channel != 'ewarp' }}
         id: bundle_cli
         run: |
           script/bundle --channel $CHANNEL --skip-build --arch aarch64 --packages deb,rpm --artifact cli
@@ -1179,11 +1190,13 @@ jobs:
           GIT_RELEASE_TAG: ${{ needs.prepare_release.outputs.release_tag }}
 
       - name: Package CLI tar.gz
+        if: ${{ inputs.channel != 'ewarp' }}
         run: |
           cp ${{ steps.bundle_cli.outputs.executable_path }} oz-${{ steps.get-config.outputs.channel }}
           tar czf oz-${{ steps.get-config.outputs.channel }}-linux-aarch64.tar.gz oz-${{ steps.get-config.outputs.channel }} -C "$(dirname "${{ steps.bundle_cli.outputs.bundled_resources_dir }}")" resources
 
       - name: Bundle Arch Linux CLI package
+        if: ${{ inputs.channel != 'ewarp' }}
         uses: ./.github/actions/bundle_arch_package
         with:
           channel: ${{ steps.get-config.outputs.channel }}
@@ -1192,7 +1205,7 @@ jobs:
           artifact: cli
 
       - name: Upload CLI debugging symbols to Sentry
-        if: ${{ needs.prepare_release.outputs.should_publish == 'true' }}
+        if: ${{ needs.prepare_release.outputs.should_publish == 'true' && inputs.channel != 'ewarp' }}
         run: |
           script/sentry_upload_dif.sh
         env:
@@ -1203,13 +1216,14 @@ jobs:
 
       - name: Sign Arch Linux packages
         run: |
-          # We technically only need to run `sign_arch_packages` once, as $APP_PKGDIR and $CLI_PKGDIR should be the same.
           ./script/linux/sign_arch_packages "$APP_PKGDIR"
-          ./script/linux/sign_arch_packages "$CLI_PKGDIR"
+          if [[ -n "$CLI_PKGDIR" ]]; then
+            ./script/linux/sign_arch_packages "$CLI_PKGDIR"
+          fi
         shell: bash
         env:
           APP_PKGDIR: ${{ steps.bundle_app.outputs.packages_dir }}
-          CLI_PKGDIR: ${{ steps.bundle_cli.outputs.packages_dir }}
+          CLI_PKGDIR: ${{ inputs.channel != 'ewarp' && steps.bundle_cli.outputs.packages_dir || '' }}
 
       - name: Add app packages to GitHub release assets
         if: ${{ needs.prepare_release.outputs.should_publish == 'true' }}
@@ -1221,14 +1235,14 @@ jobs:
 
       - name: Add CLI packages to GitHub release assets
         uses: softprops/action-gh-release@da05d552573ad5aba039eaac05058a918a7bf631 # v2.2.2
-        if: ${{ needs.prepare_release.outputs.should_publish == 'true' && steps.bundle_cli.outputs.packages_dir != steps.bundle_app.outputs.packages_dir }}
+        if: ${{ needs.prepare_release.outputs.should_publish == 'true' && inputs.channel != 'ewarp' && steps.bundle_cli.outputs.packages_dir != steps.bundle_app.outputs.packages_dir }}
         with:
           tag_name: ${{ needs.prepare_release.outputs.release_tag }}
           files: ${{ steps.bundle_cli.outputs.packages_dir }}/*
           token: ${{ secrets.GITHUB_TOKEN }}
 
       - name: Add CLI tar.gz to GitHub release assets
-        if: ${{ needs.prepare_release.outputs.should_publish == 'true' }}
+        if: ${{ needs.prepare_release.outputs.should_publish == 'true' && inputs.channel != 'ewarp' }}
         uses: softprops/action-gh-release@da05d552573ad5aba039eaac05058a918a7bf631 # v2.2.2
         with:
           tag_name: ${{ needs.prepare_release.outputs.release_tag }}
@@ -1250,7 +1264,7 @@ jobs:
 
       - name: Upload CLI packages to Google Cloud Storage
         uses: google-github-actions/upload-cloud-storage@e95a15f226403ed658d3e65f40205649f342ba2c # v1
-        if: ${{ needs.prepare_release.outputs.should_publish == 'true' && steps.bundle_cli.outputs.packages_dir != steps.bundle_app.outputs.packages_dir }}
+        if: ${{ needs.prepare_release.outputs.should_publish == 'true' && inputs.channel != 'ewarp' && steps.bundle_cli.outputs.packages_dir != steps.bundle_app.outputs.packages_dir }}
         with:
           path: ${{ steps.bundle_cli.outputs.packages_dir }}
           parent: false
@@ -1262,7 +1276,7 @@ jobs:
             cache-control: ${{ steps.get-config.outputs.gcs_cache_control_value }}
 
       - name: Upload CLI tar.gz to Google Cloud Storage
-        if: ${{ needs.prepare_release.outputs.should_publish == 'true' }}
+        if: ${{ needs.prepare_release.outputs.should_publish == 'true' && inputs.channel != 'ewarp' }}
         uses: google-github-actions/upload-cloud-storage@e95a15f226403ed658d3e65f40205649f342ba2c # v1
         with:
           path: oz-${{ steps.get-config.outputs.channel }}-linux-aarch64.tar.gz
@@ -1275,15 +1289,20 @@ jobs:
         uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6
         with:
           name: release-linux-arm64-${{ steps.get-config.outputs.channel }}
-          path: |
-            ${{ steps.bundle_app.outputs.packages_dir }}
-            oz-${{ steps.get-config.outputs.channel }}-linux-aarch64.tar.gz
+          path: ${{ steps.bundle_app.outputs.packages_dir }}
+
+      - name: Upload CLI tar.gz as workflow artifact
+        if: ${{ needs.prepare_release.outputs.should_publish != 'true' && inputs.channel != 'ewarp' }}
+        uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6
+        with:
+          name: release-linux-arm64-cli-tar-${{ steps.get-config.outputs.channel }}
+          path: oz-${{ steps.get-config.outputs.channel }}-linux-aarch64.tar.gz
 
   release_web:
     name: Build Release (Web)
     runs-on: namespace-profile-ubuntu-22-04
     needs: prepare_release
-    if: ${{ inputs.build_web != false }}
+    if: ${{ inputs.build_web != false && inputs.channel != 'ewarp' }}
     timeout-minutes: 60
     steps:
       - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
@@ -1582,7 +1601,7 @@ jobs:
           if [[ ${{ needs.release_macos_universal.result }} != 'success' ]]; then
               FAILED+=("MacOS Universal")
           fi
-          if [[ ${{ needs.release_macos_cli.result }} != 'success' ]]; then
+          if [[ ${{ needs.release_macos_cli.result }} != 'success' && "${{ inputs.channel }}" != "ewarp" ]]; then
             FAILED+=('MacOS CLI')
           fi
           if [[ ${{ needs.release_linux_x86.result }} != 'success' ]]; then
@@ -1591,10 +1610,10 @@ jobs:
           if [[ ${{ needs.release_linux_arm.result }} != 'success' ]]; then
               FAILED+=("Linux ARM64")
           fi
-          if [[ ${{ needs.release_linux_cli_x86.result }} != 'success' ]]; then
+          if [[ ${{ needs.release_linux_cli_x86.result }} != 'success' && "${{ inputs.channel }}" != "ewarp" ]]; then
               FAILED+=("Linux CLI x86_64")
           fi
-          if [[ ${{ needs.release_web.result }} != 'success' && ${{ inputs.channel }} != 'preview' ]]; then
+          if [[ ${{ needs.release_web.result }} != 'success' && "${{ inputs.channel }}" != "preview" && "${{ inputs.channel }}" != "ewarp" ]]; then
               FAILED+=("WASM")
           fi
           if [[ ${{ needs.release_windows.result }} != 'success' ]]; then

@@ -184,6 +184,11 @@ elif [[ $RELEASE_CHANNEL = "stable" ]]; then
   WARP_BIN="stable"
   BINARY_NAME="warp"
   APP_NAME="Warp"
+elif [[ $RELEASE_CHANNEL = "ewarp" ]]; then
+  WARP_BIN="ewarp"
+  BINARY_NAME="ewarp"
+  APP_NAME="eWarp"
+  FEATURES="release_bundle,offline"
 elif [[ $RELEASE_CHANNEL = "oss" ]]; then
   WARP_BIN="warp-oss"
   BINARY_NAME="warp-oss"
@@ -198,7 +203,9 @@ if [[ "$ARTIFACT" == "cli" ]]; then
   # For CLI artifacts, use oz instead of warp as the binary name.  The OSS
   # channel is an exception: its CLI command name is `warp-oss`, matching
   # `Channel::cli_command_name` in the Rust source.
-  if [[ $RELEASE_CHANNEL != "oss" ]]; then
+  if [[ $RELEASE_CHANNEL = "ewarp" ]]; then
+    BINARY_NAME="ewarp"
+  elif [[ $RELEASE_CHANNEL != "oss" ]]; then
     BINARY_NAME="${BINARY_NAME/warp/oz}"
   fi
 elif [[ "$ARTIFACT" == "warpctrl" ]]; then
