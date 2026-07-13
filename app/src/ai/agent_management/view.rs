@@ -64,6 +64,7 @@ use crate::ai::harness_display;
 use crate::app_state::PersistedAgentManagementFilters;
 use crate::appearance::Appearance;
 use crate::auth::AuthStateProvider;
+use crate::channel::ChannelState;
 use crate::editor::{
     EditorView, Event as EditorEvent, PropagateAndNoOpNavigationKeys,
     PropagateHorizontalNavigationKeys, SingleLineEditorOptions, TextOptions,
@@ -1739,18 +1740,6 @@ impl AgentManagementView {
         let time_str = format_approx_duration_from_now_utc(entry.display.last_updated);
         let time_text = Text::new_inline(time_str, font_family, font_size)
             .with_color(theme.nonactive_ui_text_color().into());
-        let creator_name = entry
-            .display
-            .creator
-            .name
-            .clone()
-            .unwrap_or_else(|| "Unknown".to_string());
-        let avatar = Self::render_avatar_with_tooltip(
-            &creator_name,
-            appearance,
-            card_state.avatar_hover_state.clone(),
-        );
-
         let mut row = Flex::row()
             .with_cross_axis_alignment(CrossAxisAlignment::Center)
             .with_spacing(2.)
@@ -1769,7 +1758,19 @@ impl AgentManagementView {
         }
 
         time_and_avatar.add_child(time_text.finish());
-        time_and_avatar.add_child(avatar);
+        if !ChannelState::is_standalone() {
+            let creator_name = entry
+                .display
+                .creator
+                .name
+                .clone()
+                .unwrap_or_else(|| "Unknown".to_string());
+            time_and_avatar.add_child(Self::render_avatar_with_tooltip(
+                &creator_name,
+                appearance,
+                card_state.avatar_hover_state.clone(),
+            ));
+        }
 
         row.add_child(
             Container::new(time_and_avatar.finish())

@@ -3,15 +3,15 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use futures::channel::oneshot;
-use futures_util::{stream, FutureExt, StreamExt};
+use futures_util::{FutureExt, StreamExt, stream};
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 use warp_multi_agent_api as api;
 
 use super::super::{RequestParams, ResponseStream};
+use crate::ai::agent::AIAgentInput;
 use crate::ai::agent::api::convert_conversation::convert_tool_call_result_to_input;
 use crate::ai::agent::task::TaskId;
-use crate::ai::agent::AIAgentInput;
 use crate::ai::document::ai_document_model::{AIDocumentId, AIDocumentVersion};
 use crate::server::server_api::AIApiError;
 
@@ -323,6 +323,87 @@ fn tool_definitions() -> Vec<serde_json::Value> {
             }),
         ),
         tool_definition(
+            "apply_file_diffs",
+            "Create, edit, move, or delete files by providing diff-style file changes. Use this when you need to write files instead of claiming file creation is unavailable.",
+            serde_json::json!({
+                "type": "object",
+                "additionalProperties": false,
+                "properties": {
+                    "summary": {
+                        "type": "string",
+                        "description": "Short description of the change set."
+                    },
+                    "diffs": {
+                        "type": "array",
+                        "description": "Search/replace edits for existing files.",
+                        "items": {
+                            "type": "object",
+                            "additionalProperties": false,
+                            "properties": {
+                                "file_path": { "type": "string" },
+                                "search": { "type": "string" },
+                                "replace": { "type": "string" }
+                            },
+                            "required": ["file_path", "search", "replace"]
+                        }
+                    },
+                    "new_files": {
+                        "type": "array",
+                        "description": "New files to create.",
+                        "items": {
+                            "type": "object",
+                            "additionalProperties": false,
+                            "properties": {
+                                "file_path": { "type": "string" },
+                                "content": { "type": "string" }
+                            },
+                            "required": ["file_path", "content"]
+                        }
+                    },
+                    "deleted_files": {
+                        "type": "array",
+                        "description": "Files to delete.",
+                        "items": {
+                            "type": "object",
+                            "additionalProperties": false,
+                            "properties": {
+                                "file_path": { "type": "string" }
+                            },
+                            "required": ["file_path"]
+                        }
+                    },
+                    "v4a_updates": {
+                        "type": "array",
+                        "description": "Optional advanced hunks for precise file edits or moves.",
+                        "items": {
+                            "type": "object",
+                            "additionalProperties": false,
+                            "properties": {
+                                "file_path": { "type": "string" },
+                                "move_to": { "type": "string" },
+                                "hunks": {
+                                    "type": "array",
+                                    "items": {
+                                        "type": "object",
+                                        "additionalProperties": false,
+                                        "properties": {
+                                            "change_context": { "type": "string" },
+                                            "pre_context": { "type": "string" },
+                                            "old": { "type": "string" },
+                                            "new": { "type": "string" },
+                                            "post_context": { "type": "string" }
+                                        },
+                                        "required": ["old", "new"]
+                                    }
+                                }
+                            },
+                            "required": ["file_path", "hunks"]
+                        }
+                    }
+                }
+            }),
+        ),
+        tool_definition(
             "run_shell_command",
             "Run a shell command with Warp permission checks. Use this for shell-native operations such as listing the immediate entries in the current directory.",
             serde_json::json!({
@@ -385,6 +466,67 @@ fn tool_call_message(call: OpenAIToolCall) -> anyhow::Result<api::message::Messa
             queries: vec![required_string(&arguments, "query")?],
             path: optional_string(&arguments, "path"),
         }),
+        "apply_file_diffs" => {
+            api::message::tool_call::Tool::ApplyFileDiffs(api::message::tool_call::ApplyFileDiffs {
+                summary: optional_string(&arguments, "summary"),
+                diffs: object_array(&arguments, "diffs")?
+                    .into_iter()
+                    .map(|diff| {
+                        Ok(api::message::tool_call::apply_file_diffs::FileDiff {
+                            file_path: required_string(&diff, "file_path")?,
+                            search: required_string(&diff, "search")?,
+                            replace: required_string(&diff, "replace")?,
+                        })
+                    })
+                    .collect::<anyhow::Result<Vec<_>>>()?,
+                new_files: object_array(&arguments, "new_files")?
+                    .into_iter()
+                    .map(|new_file| {
+                        Ok(api::message::tool_call::apply_file_diffs::NewFile {
+                            file_path: required_string(&new_file, "file_path")?,
+                            content: required_string(&new_file, "content")?,
+                        })
+                    })
+                    .collect::<anyhow::Result<Vec<_>>>()?,
+                deleted_files: object_array(&arguments, "deleted_files")?
+                    .into_iter()
+                    .map(|deleted_file| {
+                        Ok(api::message::tool_call::apply_file_diffs::DeleteFile {
+                            file_path: required_string(&deleted_file, "file_path")?,
+                        })
+                    })
+                    .collect::<anyhow::Result<Vec<_>>>()?,
+                v4a_updates: object_array(&arguments, "v4a_updates")?
+                    .into_iter()
+                    .map(|update| {
+                        Ok(api::message::tool_call::apply_file_diffs::V4aFileUpdate {
+                            file_path: required_string(&update, "file_path")?,
+                            move_to: optional_string(&update, "move_to"),
+                            hunks: object_array(&update, "hunks")?
+                                .into_iter()
+                                .map(|hunk| {
+                                    let change_context =
+                                        optional_string(&hunk, "change_context");
+                                    Ok(
+                                        api::message::tool_call::apply_file_diffs::v4a_file_update::Hunk {
+                                            change_context: if change_context.is_empty() {
+                                                vec![]
+                                            } else {
+                                                vec![change_context]
+                                            },
+                                            pre_context: optional_string(&hunk, "pre_context"),
+                                            old: required_string(&hunk, "old")?,
+                                            new: required_string(&hunk, "new")?,
+                                            post_context: optional_string(&hunk, "post_context"),
+                                        },
+                                    )
+                                })
+                                .collect::<anyhow::Result<Vec<_>>>()?,
+                        })
+                    })
+                    .collect::<anyhow::Result<Vec<_>>>()?,
+            })
+        }
         "run_shell_command" => api::message::tool_call::Tool::RunShellCommand(
             api::message::tool_call::RunShellCommand {
                 command: required_string(&arguments, "command")?,
@@ -435,6 +577,20 @@ fn required_string(value: &serde_json::Value, key: &str) -> anyhow::Result<Strin
         .ok_or_else(|| anyhow::anyhow!("Missing or invalid tool argument `{key}`."))
 }
 
+fn object_array(value: &serde_json::Value, key: &str) -> anyhow::Result<Vec<serde_json::Value>> {
+    match value.get(key) {
+        None => Ok(vec![]),
+        Some(serde_json::Value::Array(items)) => {
+            if items.iter().all(serde_json::Value::is_object) {
+                Ok(items.clone())
+            } else {
+                anyhow::bail!("Invalid tool argument `{key}`.");
+            }
+        }
+        Some(_) => anyhow::bail!("Invalid tool argument `{key}`."),
+    }
+}
+
 fn optional_string(value: &serde_json::Value, key: &str) -> String {
     value
         .get(key)
@@ -461,6 +617,35 @@ fn tool_call_to_openai(call: &api::message::ToolCall) -> Option<(&'static str, S
             serde_json::json!({
                 "query": tool.queries.first().cloned().unwrap_or_default(),
                 "path": tool.path
+            }),
+        ),
+        api::message::tool_call::Tool::ApplyFileDiffs(tool) => (
+            "apply_file_diffs",
+            serde_json::json!({
+                "summary": tool.summary,
+                "diffs": tool.diffs.iter().map(|diff| serde_json::json!({
+                    "file_path": diff.file_path,
+                    "search": diff.search,
+                    "replace": diff.replace
+                })).collect::<Vec<_>>(),
+                "new_files": tool.new_files.iter().map(|new_file| serde_json::json!({
+                    "file_path": new_file.file_path,
+                    "content": new_file.content
+                })).collect::<Vec<_>>(),
+                "deleted_files": tool.deleted_files.iter().map(|deleted_file| serde_json::json!({
+                    "file_path": deleted_file.file_path
+                })).collect::<Vec<_>>(),
+                "v4a_updates": tool.v4a_updates.iter().map(|update| serde_json::json!({
+                    "file_path": update.file_path,
+                    "move_to": update.move_to,
+                    "hunks": update.hunks.iter().map(|hunk| serde_json::json!({
+                        "change_context": hunk.change_context,
+                        "pre_context": hunk.pre_context,
+                        "old": hunk.old,
+                        "new": hunk.new,
+                        "post_context": hunk.post_context
+                    })).collect::<Vec<_>>()
+                })).collect::<Vec<_>>()
             }),
         ),
         api::message::tool_call::Tool::RunShellCommand(tool) => (
@@ -586,6 +771,7 @@ fn persisted_input_message(input: &AIAgentInput) -> Option<api::message::Message
         RequestResult::Grep(result) => MessageResult::Grep(result),
         RequestResult::FileGlob(result) => MessageResult::FileGlob(result),
         RequestResult::FileGlobV2(result) => MessageResult::FileGlobV2(result),
+        RequestResult::ApplyFileDiffs(result) => MessageResult::ApplyFileDiffs(result),
         _ => return None,
     };
 
@@ -761,6 +947,15 @@ mod tests {
         );
         assert!(required_string(&serde_json::json!({}), "pattern").is_err());
         assert!(required_string(&serde_json::json!({ "cmd": "pwd" }), "command").is_err());
+        assert_eq!(
+            object_array(
+                &serde_json::json!({ "diffs": [{ "file_path": "a.md" }] }),
+                "diffs"
+            )
+            .unwrap()
+            .len(),
+            1
+        );
     }
 
     #[test]
@@ -786,5 +981,49 @@ mod tests {
         assert!(description("file_glob").contains("Recursively search"));
         assert!(description("file_glob").contains("Do not use it to list"));
         assert!(description("run_shell_command").contains("listing the immediate entries"));
+        assert!(description("apply_file_diffs").contains("Create, edit, move, or delete files"));
+    }
+
+    #[test]
+    fn apply_file_diffs_tool_call_uses_expected_shape() {
+        let params = RequestParams::new_for_test();
+        let calls = vec![OpenAIToolCall {
+            id: "tool-call-1".to_string(),
+            function: OpenAIFunctionCall {
+                name: "apply_file_diffs".to_string(),
+                arguments: serde_json::json!({
+                    "summary": "create docs",
+                    "new_files": [
+                        {
+                            "file_path": "docs/example.md",
+                            "content": "# Example\n"
+                        }
+                    ]
+                })
+                .to_string(),
+            },
+        }];
+
+        let events = tool_call_events(&params, calls).unwrap();
+        let actions = match events[1].r#type.as_ref() {
+            Some(api::response_event::Type::ClientActions(actions)) => actions,
+            event => panic!("expected client actions, got {event:?}"),
+        };
+        let add = match actions.actions[1].action.as_ref() {
+            Some(api::client_action::Action::AddMessagesToTask(add)) => add,
+            action => panic!("expected AddMessagesToTask, got {action:?}"),
+        };
+        let call = match add.messages[0].message.as_ref() {
+            Some(api::message::Message::ToolCall(call)) => call,
+            message => panic!("expected ToolCall, got {message:?}"),
+        };
+        let tool = match call.tool.as_ref() {
+            Some(api::message::tool_call::Tool::ApplyFileDiffs(tool)) => tool,
+            tool => panic!("expected ApplyFileDiffs, got {tool:?}"),
+        };
+
+        assert_eq!(tool.summary, "create docs");
+        assert_eq!(tool.new_files.len(), 1);
+        assert_eq!(tool.new_files[0].file_path, "docs/example.md");
     }
 }
